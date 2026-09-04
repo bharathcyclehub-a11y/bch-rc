@@ -1,37 +1,51 @@
-import { and, gte, inArray, sql } from "drizzle-orm";
+import { and, gte, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
 import { formatINR } from "@/lib/utils";
 import { PAID_STATUSES } from "@/lib/order-status";
-import { addUtcDays, istDayStart } from "@/lib/tz";
+import { resolveAdminRange } from "@/lib/admin-range";
+import { RangeTabs } from "../RangeTabs";
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminFinance() {
+export default async function AdminFinance({
+  searchParams,
+}: {
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
+}) {
   const ctx = await requireAdmin();
+  const sp = await searchParams;
 
-  // Day boundaries are IST, NOT the server's UTC (Vercel). Mirror the rest of
-  // the admin (dashboard / analytics) through the shared tz helpers so the
-  // 30-day window lines up with the IST dates shown on the orders list.
-  const since = addUtcDays(istDayStart(), -29); // inclusive of today → 30 days
+  // Day boundaries are IST, NOT the server's UTC (Vercel). resolveAdminRange
+  // is the same parser the dashboard and Returns use, so "30 days" means the
+  // identical span on every page — it did not before, when this window was a
+  // hardcoded -29 days with no way to change it.
+  const range = resolveAdminRange(sp, { defaultDays: 30 });
 
   const windowWhere = and(
-    gte(orders.placedAt, since),
+    gte(orders.placedAt, range.from),
+    range.to ? lt(orders.placedAt, range.to) : undefined,
     inArray(orders.siteId, ctx.siteIds),
   );
 
+  // COD statuses that mean "parcel is out there, cash not collected yet".
+  const COD_IN_FLIGHT = [
+    "PENDING_COD_VERIFICATION",
+    "PAID",
+    "PACKED",
+    "SHIPPED",
+  ] as const;
+
   // One aggregation pass over the real orders ledger. Every figure is a FILTER
   // over the actual status/paymentMethod columns — no mock or derived numbers.
-  const [totals, methodRows] = await Promise.all([
+  const [totals, methodRows, codInFlight] = await Promise.all([
     db
       .select({
         collectedRevenue: sql<number>`coalesce(sum(${orders.totalInr}) filter (where ${orders.status} in ('PAID','PACKED','SHIPPED','DELIVERED','REFUNDED')), 0)::int`,
         paidRevenue: sql<number>`coalesce(sum(${orders.totalInr}) filter (where ${orders.status} in ('PAID','PACKED','SHIPPED','DELIVERED')), 0)::int`,
         refundValue: sql<number>`coalesce(sum(${orders.totalInr}) filter (where ${orders.status} = 'REFUNDED'), 0)::int`,
         refundCount: sql<number>`count(*) filter (where ${orders.status} = 'REFUNDED')::int`,
-        codInFlightValue: sql<number>`coalesce(sum(${orders.totalInr}) filter (where ${orders.paymentMethod} = 'COD' and ${orders.status} in ('PENDING_COD_VERIFICATION','PAID','PACKED','SHIPPED')), 0)::int`,
-        codInFlightCount: sql<number>`count(*) filter (where ${orders.paymentMethod} = 'COD' and ${orders.status} in ('PENDING_COD_VERIFICATION','PAID','PACKED','SHIPPED'))::int`,
         rtoLossValue: sql<number>`coalesce(sum(${orders.totalInr}) filter (where ${orders.status} = 'RETURNED'), 0)::int`,
         rtoCount: sql<number>`count(*) filter (where ${orders.status} = 'RETURNED')::int`,
         paidCount: sql<number>`count(*) filter (where ${orders.status} in ('PAID','PACKED','SHIPPED','DELIVERED'))::int`,
@@ -48,22 +62,45 @@ export default async function AdminFinance() {
       })
       .from(orders)
       .where(
-        and(
-          gte(orders.placedAt, since),
-          inArray(orders.siteId, ctx.siteIds),
-          inArray(orders.status, [...PAID_STATUSES]),
-        ),
+        and(windowWhere, inArray(orders.status, [...PAID_STATUSES])),
       )
       .groupBy(orders.paymentMethod)
       .orderBy(sql`coalesce(sum(${orders.totalInr}), 0) desc`),
+
+    /**
+     * COD in flight — deliberately NOT windowed, and deliberately not `total_inr`.
+     *
+     * Two bugs lived here. (1) It sat inside the 30-day window, so a COD parcel
+     * shipped 45 days ago and still uncollected silently dropped out of "in
+     * flight" — but this is a STOCK figure (cash owed to us right now), not a
+     * flow over a period, so a date filter can only ever understate it.
+     * (2) It summed `total_inr`, while the amount the courier actually collects
+     * is `total_inr - confirmation_fee_inr` (see the schema note on
+     * confirmationFeeInr: for partial-prepaid COD we already captured that fee
+     * up front). Every such order overstated the outstanding cash by its fee.
+     */
+    db
+      .select({
+        value: sql<number>`coalesce(sum(${orders.totalInr} - ${orders.confirmationFeeInr}), 0)::int`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(orders)
+      .where(
+        and(
+          inArray(orders.siteId, ctx.siteIds),
+          sql`${orders.paymentMethod} = 'COD'`,
+          inArray(orders.status, [...COD_IN_FLIGHT]),
+        ),
+      )
+      .then((r) => r[0]),
   ]);
 
   const collectedRevenue = totals?.collectedRevenue ?? 0;
   const paidRevenue = totals?.paidRevenue ?? 0;
   const refundValue = totals?.refundValue ?? 0;
   const refundCount = totals?.refundCount ?? 0;
-  const codInFlightValue = totals?.codInFlightValue ?? 0;
-  const codInFlightCount = totals?.codInFlightCount ?? 0;
+  const codInFlightValue = codInFlight?.value ?? 0;
+  const codInFlightCount = codInFlight?.count ?? 0;
   const rtoValue = totals?.rtoLossValue ?? 0;
   const rtoCount = totals?.rtoCount ?? 0;
   const paidCount = totals?.paidCount ?? 0;
@@ -77,14 +114,22 @@ export default async function AdminFinance() {
 
   return (
     <div className="space-y-3 sm:space-y-6">
-      <div>
-        <h1 className="font-display text-lg sm:text-3xl font-bold text-brand-ink">
-          Finance
-        </h1>
-        <p className="text-sm text-brand-ink-soft mt-1">
-          Last 30 days · IST · gross, paid, refunds, COD and RTO from the orders
-          ledger.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="font-display text-lg sm:text-3xl font-bold text-brand-ink">
+            Finance
+          </h1>
+          <p className="text-sm text-brand-ink-soft mt-1">
+            {range.label[0].toUpperCase() + range.label.slice(1)} · IST · gross,
+            paid, refunds and RTO from the orders ledger. COD in flight is
+            all-time.
+          </p>
+        </div>
+        <RangeTabs
+          presets={[1, 7, 14, 30, 90]}
+          defaultRange={30}
+          custom
+        />
       </div>
 
       {/* KPI cards */}
@@ -160,13 +205,13 @@ export default async function AdminFinance() {
           <h2 className="font-semibold text-brand-ink">
             Revenue by payment method{" "}
             <span className="text-brand-ink-soft font-normal">
-              — last 30 days, paid
+              — {range.label}, paid
             </span>
           </h2>
         </div>
         {isEmpty || methodRows.length === 0 ? (
           <p className="px-5 py-10 text-center text-sm text-brand-ink-soft">
-            No orders in the last 30 days yet.
+            No orders in this window yet.
           </p>
         ) : (
           <div className="overflow-x-auto no-scrollbar">
