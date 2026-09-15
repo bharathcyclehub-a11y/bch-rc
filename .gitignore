@@ -109,3 +109,6 @@ pocketrc-theme/
 
 # internal docs — kept locally, not published to GitHub
 docs/
+
+# Local development database (npm run dev:db) — PGlite data dir, never committed
+/.devdb/

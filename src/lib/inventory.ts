@@ -13,6 +13,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { inventory } from "@/db/schema";
 import { PRODUCTS } from "@/lib/products";
+import { LOW_STOCK_THRESHOLD } from "@/lib/stock-threshold";
 
 export const INVENTORY_SITE_ID = "prc";
 
@@ -31,7 +32,7 @@ export function siteIdForSku(_skuId: string): string {
 }
 
 /** Low-stock nudge threshold for both storefront badges and admin health. */
-export const LOW_STOCK_THRESHOLD = 5;
+export { LOW_STOCK_THRESHOLD };
 
 /** Canonical map key for a (sku, variant) pair. Colourless SKUs use "". */
 export function inventoryKey(skuId: string, variantSlug: string | null): string {

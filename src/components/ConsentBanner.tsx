@@ -21,12 +21,16 @@
  */
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { X } from "lucide-react";
 
 const CONSENT_KEY = "prc_consent";
 
 export default function ConsentBanner() {
   const [show, setShow] = useState(false);
+  // Shopper-facing only: the admin is an internal tool, and on phones the
+  // banner covered admin lists and save bars.
+  const internal = usePathname()?.startsWith("/admin") ?? false;
 
   useEffect(() => {
     // Defer the decision-read so SSR + first client render match (banner
@@ -48,7 +52,7 @@ export default function ConsentBanner() {
     setShow(false);
   }
 
-  if (!show) return null;
+  if (!show || internal) return null;
 
   return (
     <div

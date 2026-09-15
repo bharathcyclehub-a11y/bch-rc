@@ -51,6 +51,25 @@
 
   --gold: #d4a017;
   --success: #16a34a;
+
+  /* Admin ("Pit Lane") surfaces + status tones — docs/admin-redesign/DESIGN.md.
+     Tones are AA-contrast text colours on their tint; the meaning of each tone
+     is fixed across every admin page (see src/lib/admin/status.ts). */
+  --admin-page: #faf8f5;
+  --admin-subtle: #f4f2ee;
+  --admin-line: #e7e5e1;
+  --admin-line-strong: #d6d3ce;
+  --admin-muted: #6b6b6b;
+  --tone-pos: #15803d;
+  --tone-pos-bg: #f0fdf4;
+  --tone-warn: #b45309;
+  --tone-warn-bg: #fffbeb;
+  --tone-neg: #b91c1c;
+  --tone-neg-bg: #fef2f2;
+  --tone-info: #1d4ed8;
+  --tone-info-bg: #eff6ff;
+  --tone-neutral: #52525b;
+  --tone-neutral-bg: #f4f4f5;
 }
 
 @theme inline {
@@ -70,6 +89,22 @@
 
   --color-gold: var(--gold);
   --color-success: var(--success);
+
+  --color-admin-page: var(--admin-page);
+  --color-admin-subtle: var(--admin-subtle);
+  --color-admin-line: var(--admin-line);
+  --color-admin-line-strong: var(--admin-line-strong);
+  --color-admin-muted: var(--admin-muted);
+  --color-tone-pos: var(--tone-pos);
+  --color-tone-pos-bg: var(--tone-pos-bg);
+  --color-tone-warn: var(--tone-warn);
+  --color-tone-warn-bg: var(--tone-warn-bg);
+  --color-tone-neg: var(--tone-neg);
+  --color-tone-neg-bg: var(--tone-neg-bg);
+  --color-tone-info: var(--tone-info);
+  --color-tone-info-bg: var(--tone-info-bg);
+  --color-tone-neutral: var(--tone-neutral);
+  --color-tone-neutral-bg: var(--tone-neutral-bg);
 
   --font-sans: "General Sans", system-ui, -apple-system, sans-serif;
   --font-display: "Nippo", "General Sans", system-ui, sans-serif;
@@ -583,8 +618,71 @@ h4 {
    values — so no per-page markup changes are needed. The only rule here snaps
    card radius to the Artifact's 12px for visual parity. There is no dark mode. */
 .admin-shell {
-  background-color: var(--brand-cream);
+  background-color: var(--admin-page);
+  color: var(--brand-ink);
+  /* Width of the fixed nav column (0 phone · 72px rail · 240px sidebar). Fixed
+     bottom bars offset by it so they sit over the content, not the viewport. */
+  --admin-sidebar-w: 0px;
+  /* Space the phone tab bar occupies; bottom-anchored UI clears it. */
+  --admin-bottom-offset: 0px;
+}
+@media (min-width: 768px) {
+  .admin-shell { --admin-sidebar-w: 72px; }
+}
+@media (min-width: 1280px) {
+  .admin-shell { --admin-sidebar-w: 240px; }
+}
+@media (max-width: 767.98px) {
+  .admin-shell[data-tabbar="true"] {
+    --admin-bottom-offset: calc(64px + env(safe-area-inset-bottom));
+  }
 }
 .admin-shell .rounded-2xl {
   border-radius: 0.75rem !important; /* Artifact cards = 12px */
+}
+/* One focus ring for every admin control; inputs draw their own. */
+.admin-shell :focus-visible {
+  outline: 2px solid var(--brand-red);
+  outline-offset: 2px;
+}
+.admin-shell input:focus-visible,
+.admin-shell textarea:focus-visible,
+.admin-shell select:focus-visible {
+  outline: none;
+}
+.admin-dialog::backdrop {
+  background: rgb(10 10 10 / 0.4);
+}
+@keyframes admin-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes admin-slide-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes admin-slide-left {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes admin-slide-right {
+  from { opacity: 0; transform: translateX(-24px); }
+  to { opacity: 1; transform: none; }
+}
+.admin-anim-pop { animation: admin-pop 0.16s ease-out both; }
+.admin-anim-up { animation: admin-slide-up 0.2s ease-out both; }
+.admin-anim-left { animation: admin-slide-left 0.2s ease-out both; }
+.admin-anim-right { animation: admin-slide-right 0.2s ease-out both; }
+@media (min-width: 768px) {
+  .admin-anim-sheet { animation: admin-slide-left 0.2s ease-out both; }
+}
+@media (max-width: 767.98px) {
+  .admin-anim-sheet { animation: admin-slide-up 0.2s ease-out both; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-anim-pop,
+  .admin-anim-up,
+  .admin-anim-left,
+  .admin-anim-right,
+  .admin-anim-sheet { animation: none; }
 }

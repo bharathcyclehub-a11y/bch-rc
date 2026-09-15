@@ -205,6 +205,24 @@ export const products = pgTable(
     specs: jsonb("specs").notNull().default({}),
     hidden: boolean("hidden").notNull().default(false),
     sortOrder: integer("sort_order").notNull().default(0),
+    /**
+     * Admin-created products (migrations/manual/2026-09-15_admin_product_drafts.sql).
+     * ADMIN-ONLY today: no storefront/cart/checkout code reads this table, so
+     * only 'draft' | 'archived' are reachable from the admin UI.
+     */
+    status: text("status").notNull().default("draft"),
+    /** Hub category key (src/lib/hub-categories.ts). */
+    category: text("category"),
+    scale: text("scale"),
+    description: text("description"),
+    tags: text("tags")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    trackInventory: boolean("track_inventory").notNull().default(true),
+    lowStockThreshold: integer("low_stock_threshold").notNull().default(5),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -238,6 +256,10 @@ export const productVariants = pgTable(
     priceInrOverride: integer("price_inr_override"),
     image: text("image"),
     sortOrder: integer("sort_order").notNull().default(0),
+    sku: text("sku"),
+    /** Planned stock for an admin draft; seeds `inventory` when published. */
+    openingStock: integer("opening_stock").notNull().default(0),
+    status: text("status").notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

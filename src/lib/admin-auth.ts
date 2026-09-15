@@ -107,6 +107,34 @@ export async function resolveAdmin(user: {
 }
 
 /**
+ * LOCAL DEVELOPMENT ONLY — act as ADMIN_DEV_EMAIL without Supabase, so the
+ * admin runs against the local database (scripts/dev-db-setup.ts). Active only
+ * under `next dev` (NODE_ENV=development) while Supabase is NOT configured and
+ * ADMIN_DEV_EMAIL is set; the email must still be an active `admins` row in the
+ * connected database. Production always runs NODE_ENV=production with Supabase
+ * configured, so this path can never activate there.
+ */
+const DEV_ADMIN_EMAIL =
+  process.env.NODE_ENV === "development" && !process.env.NEXT_PUBLIC_SUPABASE_URL
+    ? process.env.ADMIN_DEV_EMAIL?.trim().toLowerCase() || null
+    : null;
+
+async function devAdminContext(email: string): Promise<AdminContext | null> {
+  const [row] = await withDbRetry(
+    () => db.select().from(admins).where(eq(admins.email, email)),
+    "admins.select-dev",
+  );
+  if (!row || !row.active) return null;
+  return {
+    authUserId: row.authUserId,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+    siteIds: row.siteIds,
+  };
+}
+
+/**
  * Resolve the current admin context from the verified Supabase user.
  * Returns null if no authenticated user, no admin row, or the user is inactive.
  *
@@ -121,6 +149,7 @@ export async function resolveAdmin(user: {
  */
 export const getAdminContext = cache(
   async (): Promise<AdminContext | null> => {
+    if (DEV_ADMIN_EMAIL) return devAdminContext(DEV_ADMIN_EMAIL);
     const supabase = await createClient();
     const {
       data: { user },

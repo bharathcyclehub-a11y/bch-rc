@@ -146,22 +146,34 @@ if (connectionString) {
 //
 // max: 3 — small per-Lambda pool, big enough for one Promise.all of 4-5
 // admin aggregates to genuinely parallelise.
+//
+// DATABASE_POOL_MAX overrides the pool size (unset in production → 3). The
+// local dev database (scripts/dev-db-setup.ts, PGlite) is a single Postgres
+// session, so it runs with 1 to keep concurrent queries from colliding.
 const globalForDb = globalThis as unknown as {
   __pgClient?: ReturnType<typeof postgres>;
+  __pgClientKey?: string;
 };
 
+const poolMax = Number(process.env.DATABASE_POOL_MAX) || 3;
+// The dev cache is keyed by DSN + pool size so editing .env.local takes effect
+// without restarting the dev server.
+const clientKey = `${effectiveDsn}|${poolMax}`;
+
 const queryClient =
-  globalForDb.__pgClient ??
-  postgres(effectiveDsn, {
-    prepare: false,
-    max: 3,
-    idle_timeout: 20,
-    max_lifetime: 60 * 5,
-    connect_timeout: 10,
-  });
+  globalForDb.__pgClient && globalForDb.__pgClientKey === clientKey
+    ? globalForDb.__pgClient
+    : postgres(effectiveDsn, {
+        prepare: false,
+        max: poolMax,
+        idle_timeout: 20,
+        max_lifetime: 60 * 5,
+        connect_timeout: 10,
+      });
 
 if (process.env.NODE_ENV !== "production") {
   globalForDb.__pgClient = queryClient;
+  globalForDb.__pgClientKey = clientKey;
 }
 
 export const db = drizzle(queryClient, { schema });
