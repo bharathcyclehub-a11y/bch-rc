@@ -109,3 +109,5 @@ pocketrc-theme/
 
 # internal docs — kept locally, not published to GitHub
 docs/
+
+.env*

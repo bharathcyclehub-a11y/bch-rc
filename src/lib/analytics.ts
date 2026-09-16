@@ -18,9 +18,8 @@
 export const VISITOR_COOKIE = "prc_vid";
 export const SESSION_COOKIE = "prc_sid";
 
-/** 30-minute inactivity window — the GA4 / WooCommerce standard. The session
- *  cookie is re-set on every tracked request, so it slides forward while the
- *  visitor stays active and lapses after 30 min idle. */
+/** Fixed 30-minute browser session cookie. Session liveness is recorded
+ * separately; the cookie currently expires 30 minutes after creation. */
 export const SESSION_TTL_SECONDS = 30 * 60;
 /** 1 year. */
 export const VISITOR_TTL_SECONDS = 365 * 24 * 60 * 60;
@@ -85,7 +84,12 @@ export type TrafficSource =
 const SEARCH_HOSTS =
   /(^|\.)(google|bing|yahoo|duckduckgo|ecosia|baidu|yandex|brave|qwant|startpage)\./i;
 const SOCIAL_HOSTS =
-  /(^|\.)(facebook|fb|instagram|t\.co|twitter|x|youtube|youtu\.be|linkedin|pinterest|reddit|whatsapp|wa\.me|telegram|t\.me|snapchat|tiktok|threads)\./i;
+  /(^|\.)(?:(facebook|fb|instagram|twitter|x|youtube|linkedin|pinterest|reddit|whatsapp|telegram|snapchat|tiktok|threads)\.[a-z.]+|t\.co|youtu\.be|wa\.me|t\.me)$/i;
+const SOCIAL_SOURCES = /^(facebook|fb|instagram|ig|twitter|x|youtube|linkedin|pinterest|reddit|whatsapp|telegram|snapchat|tiktok|threads)$/i;
+
+function normaliseHost(host: string): string {
+  return host.toLowerCase().replace(/^www\./, "").split(":")[0];
+}
 
 /**
  * Classify an acquisition source from UTM + referrer, last-click style.
@@ -99,7 +103,7 @@ export function classifySource(input: {
   referrerHost?: string | null;
   selfHost?: string | null;
 }): TrafficSource {
-  const medium = (input.utmMedium ?? "").toLowerCase();
+  const medium = (input.utmMedium ?? "").trim().toLowerCase();
   if (medium) {
     if (/cpc|ppc|paid|paidsearch|display|cpm|banner|retargeting/.test(medium))
       return "paid";
@@ -113,13 +117,14 @@ export function classifySource(input: {
   // A UTM source without a medium (common on social shares) → social if it
   // looks social, else referral.
   if (input.utmSource) {
-    if (SOCIAL_HOSTS.test(input.utmSource)) return "social";
+    const source = input.utmSource.trim();
+    if (SOCIAL_HOSTS.test(source) || SOCIAL_SOURCES.test(source)) return "social";
     return "referral";
   }
 
-  const ref = (input.referrerHost ?? "").toLowerCase();
+  const ref = normaliseHost(input.referrerHost ?? "");
   if (!ref) return "direct";
-  if (input.selfHost && ref === input.selfHost.toLowerCase()) return "direct";
+  if (input.selfHost && ref === normaliseHost(input.selfHost)) return "direct";
   if (SEARCH_HOSTS.test(ref)) return "organic";
   if (SOCIAL_HOSTS.test(ref)) return "social";
   return "referral";
@@ -159,6 +164,8 @@ export function shouldTrackPath(pathname: string): boolean {
     pathname.startsWith("/api") ||
     pathname.startsWith("/admin") ||
     pathname.startsWith("/cod") ||
+    pathname.startsWith("/pack") ||
+    pathname === "/maintenance" ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/monitoring") ||
     pathname === "/favicon.ico" ||

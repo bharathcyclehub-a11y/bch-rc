@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { and, desc, inArray, sql } from "drizzle-orm";
+import { and, desc, gte, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
 import { formatINR, formatIST } from "@/lib/utils";
+import { resolveAdminRange } from "@/lib/admin-range";
+import { RangeTabs } from "../RangeTabs";
 
 export const dynamic = "force-dynamic";
 
@@ -23,8 +25,28 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-export default async function AdminReturns() {
+export default async function AdminReturns({
+  searchParams,
+}: {
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>;
+}) {
   const ctx = await requireAdmin();
+  const sp = await searchParams;
+
+  // This page had NO window at all — every figure was all-time, so the RTO rate
+  // could never show whether returns were getting better or worse. Same parser
+  // as Finance and the dashboard, so a given preset means the same span here.
+  const range = resolveAdminRange(sp, { defaultDays: 30 });
+
+  // Windowed on placedAt (not on when the return happened) so the RTO rate is
+  // returns ÷ dispatches for the SAME cohort of orders — comparing returns
+  // recorded this month against orders placed this month would flatter a
+  // growing month and punish a shrinking one.
+  const windowWhere = and(
+    inArray(orders.siteId, ctx.siteIds),
+    gte(orders.placedAt, range.from),
+    range.to ? lt(orders.placedAt, range.to) : undefined,
+  );
 
   const [agg, list] = await Promise.all([
     db
@@ -37,7 +59,7 @@ export default async function AdminReturns() {
         dispatched: sql<number>`count(*) filter (where ${orders.status} in ('SHIPPED','DELIVERED','RETURNED'))::int`,
       })
       .from(orders)
-      .where(inArray(orders.siteId, ctx.siteIds))
+      .where(windowWhere)
       .then((r) => r[0]),
     db
       .select({
@@ -53,7 +75,7 @@ export default async function AdminReturns() {
       .from(orders)
       .where(
         and(
-          inArray(orders.siteId, ctx.siteIds),
+          windowWhere,
           inArray(orders.status, [
             "RETURNED",
             "REFUNDED",
@@ -77,14 +99,18 @@ export default async function AdminReturns() {
 
   return (
     <div className="space-y-3 sm:space-y-6">
-      <div>
-        <h1 className="font-display text-xl sm:text-3xl font-bold text-brand-ink">
-          Returns / RTO
-        </h1>
-        <p className="text-sm text-brand-ink-soft mt-1">
-          Return-to-origin, refunds and cancellations — kept distinct, from the
-          orders ledger.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="font-display text-xl sm:text-3xl font-bold text-brand-ink">
+            Returns / RTO
+          </h1>
+          <p className="text-sm text-brand-ink-soft mt-1">
+            Return-to-origin, refunds and cancellations — kept distinct, from the
+            orders ledger. {range.label[0].toUpperCase() + range.label.slice(1)},
+            by order date.
+          </p>
+        </div>
+        <RangeTabs presets={[7, 14, 30, 90]} defaultRange={30} custom />
       </div>
 
       {/* KPI cards */}

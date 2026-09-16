@@ -48,7 +48,7 @@ export function detectFunnelAnomalies(stages: StageCount[]): string[] {
     if (cur.visitors > prev.visitors) {
       anomalies.push(
         `“${cur.label}” (${cur.visitors.toLocaleString("en-IN")}) exceeds “${prev.label}” (${prev.visitors.toLocaleString("en-IN")}). ` +
-          `These stages use different sources — orders are counted exactly from the ledger, upstream steps from cookie-based tracking that ad-blockers undercount. Treat the gap as a tracking blind spot, not a real increase.`,
+          `Stage reach is counted independently: visitors can skip steps, browser events may be missing, and buyers use a different identity from visitors. These totals do not measure a linked sequence of people.`,
       );
     }
   }

@@ -11,7 +11,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { recordFunnelEvents, type FunnelEventInput } from "@/lib/funnel-server";
-import { MAX_FUNNEL_BATCH } from "@/lib/funnel-events";
+import { isTrackingUuid, MAX_FUNNEL_BATCH, MAX_FUNNEL_BODY_BYTES } from "@/lib/funnel-events";
+import { VISITOR_COOKIE } from "@/lib/analytics";
 import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -20,6 +21,10 @@ export const dynamic = "force-dynamic";
 type Body = { events?: FunnelEventInput[] };
 
 export async function POST(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  if ((origin && origin !== req.nextUrl.origin) || req.headers.get("sec-fetch-site") === "cross-site" || !isTrackingUuid(req.cookies.get(VISITOR_COOKIE)?.value)) {
+    return new NextResponse(null, { status: 204 });
+  }
   // Shed floods that would bloat funnel_events. Silent 204 keeps the
   // "never surface an error to the page" telemetry contract. Generous cap so
   // real batched browsing is never throttled.
@@ -29,12 +34,16 @@ export async function POST(req: NextRequest) {
   let body: Body;
   try {
     // sendBeacon sends as text/plain; parse defensively regardless of header.
-    body = JSON.parse(await req.text()) as Body;
+    const raw = await req.text();
+    if (new TextEncoder().encode(raw).length > MAX_FUNNEL_BODY_BYTES) return new NextResponse(null, { status: 204 });
+    body = JSON.parse(raw) as Body;
   } catch {
     return new NextResponse(null, { status: 204 });
   }
 
-  const events = Array.isArray(body.events) ? body.events.slice(0, MAX_FUNNEL_BATCH) : [];
+  const events = body && Array.isArray(body.events)
+    ? body.events.slice(0, MAX_FUNNEL_BATCH).filter((e) => e && typeof e === "object" && e.type !== "order_submitted")
+    : [];
   if (events.length) await recordFunnelEvents(req, events);
 
   return new NextResponse(null, { status: 204 });

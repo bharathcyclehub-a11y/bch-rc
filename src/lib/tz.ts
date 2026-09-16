@@ -50,6 +50,17 @@ export function istYmd(d: Date): string {
   return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(ist.getUTCDate()).padStart(2, "0")}`;
 }
 
+/** Parse an actual IST calendar date, rejecting rollover dates such as Feb 31. */
+export function istDayStartFromYmd(ymd: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  const [year, month, day] = ymd.split("-").map(Number);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(0, 0, 0, 0);
+  const instant = new Date(calendar.getTime() - IST_OFFSET_MS);
+  return Number.isFinite(instant.getTime()) && istYmd(instant) === ymd ? instant : null;
+}
+
 /** Short human day label ("08 Jul"), always rendered in IST. */
 export function istShortDate(d: Date): string {
   return d.toLocaleDateString("en-IN", {

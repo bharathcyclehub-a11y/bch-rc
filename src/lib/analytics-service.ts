@@ -11,17 +11,15 @@
  *
  * ── THE TWO TABLES ARE NOT INTERCHANGEABLE ─────────────────────────────────
  *
- *   analytics_sessions  written SERVER-SIDE by the edge middleware (/api/track),
- *                       once per session. Ad-blocker-proof. The record of truth
- *                       for "did a person visit".
+ *   analytics_sessions  server session records, one row per session. The
+ *                       canonical source for visits captured by this app.
  *
  *   funnel_events       written CLIENT-SIDE by the batched browser beacon.
  *                       Ad-blockable, and lost when a visitor bounces before the
- *                       batch flushes. Measured coverage: ~82% of visitors.
+ *                       batch flushes. Coverage varies by date and browser.
  *
- * A visitor therefore ALWAYS exists in analytics_sessions and only *sometimes*
- * in funnel_events. Never count "visitors" from funnel_events — that is what
- * made the funnel disagree with the dashboard by ~17%.
+ * Never substitute event visitors for session visitors. Request ordering,
+ * blocked beacons and sessions crossing midnight can make coverage differ.
  *
  * ── CANONICAL DEFINITIONS (do not mix them) ────────────────────────────────
  *
@@ -46,33 +44,13 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { PAID_STATUSES, VALID_ORDER_STATUSES } from "@/lib/order-status";
-import { addUtcDays, istDayStart } from "@/lib/tz";
 import { safePct } from "@/lib/analytics-validation";
+import { fillSalesTimeSeries, type AnalyticsGranularity, type MetricWindow, type SalesTimePoint } from "@/lib/analytics-range";
+
+export { analyticsWindow, MAX_WINDOW_DAYS } from "@/lib/analytics-range";
+export type { MetricWindow } from "@/lib/analytics-range";
 
 const num = (v: unknown): number => Number(v ?? 0) || 0;
-
-export const MAX_WINDOW_DAYS = 365;
-
-export type MetricWindow = {
-  /** Length of the window in whole IST days, inclusive of today. */
-  days: number;
-  /** First instant of the window (IST midnight, `days-1` days ago). */
-  start: Date;
-  /** First instant of the immediately-preceding equal-length window. */
-  prevStart: Date;
-};
-
-/**
- * The ONLY way to build an analytics date window. IST day-aligned (India has no
- * DST, so a fixed +5:30 offset is exact) and inclusive of today.
- *   analyticsWindow(7).start === IST midnight, 6 days ago  → 7 buckets
- */
-export function analyticsWindow(days: number, now?: Date): MetricWindow {
-  const d = Math.max(1, Math.min(MAX_WINDOW_DAYS, Math.floor(days) || 1));
-  const today = istDayStart(now);
-  const start = addUtcDays(today, -(d - 1));
-  return { days: d, start, prevStart: addUtcDays(start, -d) };
-}
 
 /** `site_id = ANY(...)`. An empty list matches nothing → all-zero metrics. */
 function siteArray(siteIds: string[]) {
@@ -98,7 +76,7 @@ export type Audience = {
   visitors: number;
   /** SESSION — visits. Always >= visitors. */
   sessions: number;
-  /** PAGEVIEW — page loads. Always >= sessions. */
+  /** PAGEVIEW — observed page loads; blocked/missing events can leave a session at zero. */
   pageviews: number;
   /** Unique visitors since IST midnight today. */
   visitorsToday: number;
@@ -116,8 +94,8 @@ const EMPTY_AUDIENCE: Audience = {
 
 /**
  * Every session-derived audience metric in ONE round-trip. `todayStart` and
- * `liveSince` are optional extras the dashboard needs; omit them and those
- * fields mirror the main window.
+ * `liveSince` are optional dashboard extras. Without them, the selected start
+ * date is used; live activity is measured by last_seen_at rather than arrival.
  */
 export async function getAudience(
   siteIds: string[],
@@ -130,16 +108,18 @@ export async function getAudience(
   const to = upper("started_at", opts.to);
   const todayIso = (opts.todayStart ?? opts.from).toISOString();
   const liveIso = (opts.liveSince ?? opts.from).toISOString();
+  const earliestArrival = new Date(Math.min(opts.from.getTime(), (opts.todayStart ?? opts.from).getTime())).toISOString();
 
   const [r] = await rows(sql`
     SELECT
       count(DISTINCT visitor_id) FILTER (WHERE is_bot = false AND started_at >= ${from}${to})::int AS visitors,
       count(*)                   FILTER (WHERE is_bot = false AND started_at >= ${from}${to})::int AS sessions,
       coalesce(sum(pageview_count) FILTER (WHERE is_bot = false AND started_at >= ${from}${to}), 0)::int AS pageviews,
-      count(DISTINCT visitor_id) FILTER (WHERE is_bot = false AND started_at >= ${todayIso})::int AS visitors_today,
-      count(DISTINCT visitor_id) FILTER (WHERE is_bot = false AND last_seen_at >= ${liveIso})::int AS live_visitors
+      count(DISTINCT visitor_id) FILTER (WHERE is_bot = false AND started_at >= ${todayIso}${to})::int AS visitors_today,
+      count(DISTINCT visitor_id) FILTER (WHERE is_bot = false AND last_seen_at >= ${liveIso}${upper("last_seen_at", opts.to)})::int AS live_visitors
     FROM analytics_sessions
     WHERE site_id = ANY(${sites})
+      AND ((started_at >= ${earliestArrival}${to}) OR (last_seen_at >= ${liveIso}${upper("last_seen_at", opts.to)}))
   `);
 
   return {
@@ -191,6 +171,7 @@ export async function getSessions(
 export async function getReturningVisitors(
   siteIds: string[],
   from: Date,
+  to?: Date,
 ): Promise<number> {
   if (siteIds.length === 0) return 0;
   const sites = siteArray(siteIds);
@@ -198,7 +179,7 @@ export async function getReturningVisitors(
   const [r] = await rows(sql`
     SELECT count(DISTINCT a.visitor_id)::int AS c
     FROM analytics_sessions a
-    WHERE a.site_id = ANY(${sites}) AND a.is_bot = false AND a.started_at >= ${iso}
+    WHERE a.site_id = ANY(${sites}) AND a.is_bot = false AND a.started_at >= ${iso}${upper("a.started_at", to)}
       AND EXISTS (
         SELECT 1 FROM analytics_sessions b
         WHERE b.visitor_id = a.visitor_id
@@ -234,7 +215,7 @@ export async function getTrackedVisitors(
 export type OrderMetrics = {
   /** ORDER — order rows with a paid status. */
   orders: number;
-  /** Revenue of those paid orders, in INR. */
+  /** Active order value in INR by placed_at; includes COD awaiting collection. */
   revenue: number;
   /** BUYER — distinct customers with a real (non-failed) order. */
   buyers: number;
@@ -257,7 +238,7 @@ export async function getOrderMetrics(
   const [r] = await rows(sql`
     SELECT
       count(*) FILTER (WHERE status IN (${paid}))::int AS orders,
-      coalesce(sum(total_inr) FILTER (WHERE status IN (${paid})), 0)::int AS revenue,
+      coalesce(sum(total_inr) FILTER (WHERE status IN (${paid})), 0)::bigint AS revenue,
       count(DISTINCT customer_id) FILTER (WHERE status IN (${valid}))::int AS buyers,
       count(DISTINCT customer_id) FILTER (WHERE status IN (${paid}))::int AS paid_buyers
     FROM orders
@@ -271,6 +252,44 @@ export async function getOrderMetrics(
     buyers: num(r?.buyers),
     paidBuyers: num(r?.paid_buyers),
   };
+}
+
+/**
+ * Active sales by order-placement date. Uses the same status set and bounds
+ * as getOrderMetrics. Returns every calendar bucket, including zero sales.
+ * Customers are profiles first created in the period, not distinct buyers.
+ */
+export async function getSalesTimeSeries(
+  siteIds: string[],
+  window: MetricWindow,
+  granularity: AnalyticsGranularity = "day",
+): Promise<SalesTimePoint[]> {
+  if (siteIds.length === 0) return fillSalesTimeSeries(window, granularity, [], []);
+  const sites = siteArray(siteIds);
+  const paid = sql.join(PAID_STATUSES.map((s) => sql`${s}`), sql`, `);
+  const [sales, customers] = await Promise.all([
+    rows(sql`
+      SELECT to_char(date_trunc(${granularity}, placed_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS key,
+             count(*)::int AS orders, coalesce(sum(total_inr), 0)::bigint AS revenue
+      FROM orders
+      WHERE site_id = ANY(${sites}) AND status IN (${paid})
+        AND placed_at >= ${window.start.toISOString()} AND placed_at < ${window.end.toISOString()}
+      GROUP BY 1 ORDER BY 1
+    `),
+    rows(sql`
+      SELECT to_char(date_trunc(${granularity}, created_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS key,
+             count(*)::int AS customers
+      FROM customers
+      WHERE first_site_id = ANY(${sites})
+        AND created_at >= ${window.start.toISOString()} AND created_at < ${window.end.toISOString()}
+      GROUP BY 1 ORDER BY 1
+    `),
+  ]);
+  return fillSalesTimeSeries(
+    window, granularity,
+    sales.map((row) => ({ key: String(row.key), revenue: num(row.revenue), orders: num(row.orders) })),
+    customers.map((row) => ({ key: String(row.key), customers: num(row.customers) })),
+  );
 }
 
 /** CONVERSION — paid orders ÷ unique visitors, as a percentage. */
@@ -296,9 +315,9 @@ export type SanityInput = {
 };
 
 /**
- * Impossible-state detector. These invariants hold by definition; a violation
- * means a query regressed (wrong table, wrong window, or a units mix-up).
- * Returns human-readable warnings — empty when healthy.
+ * Metric checks: cardinality invariants plus cross-source coverage anomalies.
+ * Coverage warnings can also reflect missing requests or sessions that began
+ * before midnight; they are not proof of database corruption.
  */
 export function checkMetricSanity(m: SanityInput): string[] {
   const w: string[] = [];
@@ -307,11 +326,8 @@ export function checkMetricSanity(m: SanityInput): string[] {
   if (has(m.visitors) && has(m.sessions) && m.visitors > m.sessions)
     w.push(`visitors (${m.visitors}) > sessions (${m.sessions}) — a person cannot have fewer visits than themselves.`);
 
-  if (has(m.sessions) && has(m.pageviews) && m.sessions > m.pageviews)
-    w.push(`sessions (${m.sessions}) > pageviews (${m.pageviews}) — every session has >= 1 pageview.`);
-
   if (has(m.trackedVisitors) && has(m.visitors) && m.trackedVisitors > m.visitors)
-    w.push(`tracked visitors (${m.trackedVisitors}) > visitors (${m.visitors}) — client events cannot exceed server sessions.`);
+    w.push(`tracked visitors (${m.trackedVisitors}) > visitors (${m.visitors}) — inspect session/event coverage and sessions crossing the selected boundary.`);
 
   if (has(m.paidBuyers) && has(m.buyers) && m.paidBuyers > m.buyers)
     w.push(`paid buyers (${m.paidBuyers}) > buyers (${m.buyers}) — PAID_STATUSES must be a subset of VALID_ORDER_STATUSES.`);

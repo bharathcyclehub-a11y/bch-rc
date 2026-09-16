@@ -143,6 +143,7 @@ export const customers = pgTable(
   (t) => [
     index("customers_email_idx").on(t.email),
     index("customers_auth_user_idx").on(t.authUserId),
+    index("customers_firstsite_created_idx").on(t.firstSiteId, t.createdAt),
   ],
 );
 
@@ -480,6 +481,7 @@ export const orders = pgTable(
   },
   (t) => [
     index("orders_site_idx").on(t.siteId),
+    index("orders_site_placed_idx").on(t.siteId, t.placedAt),
     index("orders_customer_idx").on(t.customerId),
     index("orders_status_idx").on(t.status),
     index("orders_razorpay_order_idx").on(t.razorpayOrderId),
