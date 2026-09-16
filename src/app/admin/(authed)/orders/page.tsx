@@ -1,454 +1,364 @@
 import Link from "next/link";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Package,
-  Plus,
-  Search,
-} from "lucide-react";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { ChevronRight, Download, Inbox, Package, Plus, SearchX } from "lucide-react";
+import { and, desc, eq, gte, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
-import { formatINR, formatIST } from "@/lib/utils";
-
-// Status groupings driven by the WhatsApp brief:
-//   - LIVE_STATUSES: paid orders + confirmed COD + anything in fulfilment.
-//                    These are the ones the operator acts on every day.
-//   - PENDING_STATUSES: UPI carts that started checkout but never captured.
-//                       Useful for retry-emails / abandonment follow-up.
-//   - FAILED_STATUSES: terminal-unhappy. Manual follow-up bucket.
-const LIVE_STATUSES = ["PAID", "PACKED", "SHIPPED", "DELIVERED"] as const;
-// PENDING (prepaid that opened Razorpay but hasn't captured) lives here
-// alongside PENDING_COD_VERIFICATION (COD waiting for the /cod operator to
-// call + confirm). Both are pre-fulfilment states; lumping them in the same
-// bucket keeps the admin counts honest.
-const PENDING_STATUSES = ["PENDING", "PENDING_COD_VERIFICATION"] as const;
-const FAILED_STATUSES = [
-  "CANCELLED",
-  "FAILED",
-  "ABANDONED",
-  "RETURNED",
-  "REFUNDED",
-] as const;
-
-type View = "live" | "pending" | "failed" | "manual" | "all";
+import { bucketOfStatus, FAILED_STATUSES, PAID_STATUSES, PENDING_STATUSES } from "@/lib/order-status";
+import { formatDateTimeShort, formatPhone } from "@/lib/admin/format";
+import { PAYMENT_METHOD_LABEL, paymentStateMeta } from "@/lib/admin/status";
+import { formatINR } from "@/lib/utils";
+import { OrderStatusBadge, Tag } from "@/components/admin/Badge";
+import { buttonClass, ButtonLink } from "@/components/admin/Button";
+import { EmptyState } from "@/components/admin/EmptyState";
+import { UrlFilters, type FilterDef } from "@/components/admin/Filters";
+import { PageHeader } from "@/components/admin/PageHeader";
+import { Pagination } from "@/components/admin/Pagination";
+import { Panel } from "@/components/admin/Panel";
+import { SearchForm } from "@/components/admin/SearchForm";
+import { RowLink, Table, TBody, TD, TH, THead, TR } from "@/components/admin/Table";
+import { Tabs } from "@/components/admin/Tabs";
+import { OrderRowActions } from "./OrderRowActions";
 
 const PAGE_SIZE = 50;
 
-export default async function AdminOrdersList({
-  searchParams,
-}: {
-  searchParams: Promise<{
-    view?: string;
-    q?: string;
-    page?: string;
-  }>;
-}) {
+/**
+ * Views (tabs). Status sets come from @/lib/order-status so counts agree with
+ * analytics:
+ *   live    — paid + confirmed COD + anything in fulfilment (the daily work)
+ *   pending — prepaid checkout not captured yet + COD awaiting the verify call
+ *   failed  — terminal-unhappy incl. post-sale reversals (follow-up bucket)
+ *   manual  — created by an admin, any status
+ */
+const VIEWS = [
+  { key: "live", label: "Live", emptyTitle: "No live orders", emptyText: "Paid orders will appear here as customers check out." },
+  { key: "pending", label: "Pending", emptyTitle: "No pending orders", emptyText: "UPI carts in progress will appear here." },
+  { key: "failed", label: "Failed", emptyTitle: "No failed orders", emptyText: "Nothing to follow up on — clean slate." },
+  { key: "manual", label: "Manual", emptyTitle: "No manual orders yet", emptyText: "Orders created by an admin appear here." },
+  { key: "all", label: "All", emptyTitle: "No orders yet", emptyText: "Orders appear here as soon as customers check out." },
+] as const;
+type View = (typeof VIEWS)[number]["key"];
+const VIEW_KEYS: readonly View[] = VIEWS.map((v) => v.key);
+
+const METHODS = ["UPI", "CARD", "NETBANKING", "WALLET", "COD"] as const;
+type Method = (typeof METHODS)[number];
+
+const RANGES = { today: "Today", "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days" } as const;
+type Range = keyof typeof RANGES;
+const RANGE_KEYS = Object.keys(RANGES) as Range[];
+const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90 } as const;
+
+const FILTERS: FilterDef[] = [
+  { key: "method", label: "Payment", options: [{ value: "", label: "All" }, ...METHODS.map((m) => ({ value: m, label: methodLabel(m) }))] },
+  { key: "range", label: "Date", options: [{ value: "", label: "All time" }, ...RANGE_KEYS.map((r) => ({ value: r, label: RANGES[r] }))] },
+];
+
+/** Only the columns the list renders — keeps the items JSONB etc. off the wire. */
+const LIST_COLUMNS = {
+  id: orders.id, status: orders.status, createdVia: orders.createdVia, placedAt: orders.placedAt,
+  shippingAddress: orders.shippingAddress, paymentMethod: orders.paymentMethod, paymentStatus: orders.paymentStatus,
+  courierName: orders.courierName, awbCode: orders.awbCode, trackingUrl: orders.trackingUrl, totalInr: orders.totalInr,
+};
+type OrderRow = Pick<typeof orders.$inferSelect, keyof typeof LIST_COLUMNS>;
+
+type SearchParams = Record<string, string | string[] | undefined>;
+type ListState = { view: View; q: string; method: Method | ""; range: Range | "" };
+
+/** Fresh `count(*)` per select — a selected field's SQL carries its decoder, so don't share one instance. */
+const countAll = () => sql<number>`count(*)::int`;
+
+export default async function AdminOrdersList({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await requireAdmin();
   const params = await searchParams;
 
   // 1-based page. Anything non-numeric / < 1 falls back to page 1.
-  const page = Math.max(1, Math.floor(Number(params.page)) || 1);
+  const page = Math.max(1, Math.floor(Number(first(params.page))) || 1);
   const offset = (page - 1) * PAGE_SIZE;
+  const state: ListState = {
+    view: pick(VIEW_KEYS, first(params.view)) || "live",
+    q: first(params.q).trim(),
+    method: pick(METHODS, first(params.method)),
+    range: pick(RANGE_KEYS, first(params.range)),
+  };
+  const { view, q, method, range } = state;
+  const filtered = Boolean(q || method || range);
 
-  const view: View =
-    params.view === "pending"
-      ? "pending"
-      : params.view === "failed"
-        ? "failed"
-        : params.view === "manual"
-          ? "manual"
-          : params.view === "all"
-            ? "all"
-            : "live";
+  const inScope = inArray(orders.siteId, ctx.siteIds);
 
-  const q = (params.q ?? "").trim();
+  // List filter: site scope + the view's status set, then the URL filters and
+  // search. Filters narrow the list only — tab counts stay global.
+  const conditions: SQL[] = [inScope];
+  if (view === "live") conditions.push(inArray(orders.status, [...PAID_STATUSES]));
+  else if (view === "pending") conditions.push(inArray(orders.status, [...PENDING_STATUSES]));
+  else if (view === "failed") conditions.push(inArray(orders.status, [...FAILED_STATUSES]));
+  else if (view === "manual") conditions.push(eq(orders.createdVia, "ADMIN_MANUAL"));
+  if (method) conditions.push(eq(orders.paymentMethod, method));
+  const since = placedSince(range);
+  if (since) conditions.push(gte(orders.placedAt, since));
+  if (q) conditions.push(searchCondition(q));
 
-  const visibleSiteIds = ctx.siteIds;
+  const [bucketRows, [{ count: manualCount }], [{ count: toShip }], fetched] = await Promise.all([
+    // Every bucket from one grouped query, whichever view is active.
+    db.select({ status: orders.status, count: countAll() }).from(orders).where(inScope).groupBy(orders.status),
+    // Manual cuts across statuses, so it's counted separately.
+    db.select({ count: countAll() }).from(orders).where(and(inScope, eq(orders.createdVia, "ADMIN_MANUAL"))),
+    // Paid but not yet handed to a courier.
+    db.select({ count: countAll() }).from(orders).where(and(inScope, eq(orders.status, "PAID"), isNull(orders.awbCode))),
+    // PAGE_SIZE + 1 tells us whether a next page exists without a count query.
+    db
+      .select(LIST_COLUMNS)
+      .from(orders)
+      .where(and(...conditions))
+      .orderBy(desc(orders.placedAt))
+      .limit(PAGE_SIZE + 1)
+      .offset(offset),
+  ]);
 
-  // Bucket counts come from a single grouped query, NOT three separate
-  // SELECTs — same wall-clock, all four buttons accurate regardless of
-  // which view is active.
-  const bucketRows = await db
-    .select({
-      status: orders.status,
-      count: sql<number>`count(*)::int`,
-    })
-    .from(orders)
-    .where(inArray(orders.siteId, visibleSiteIds))
-    .groupBy(orders.status);
-
-  const counts = { live: 0, pending: 0, failed: 0, manual: 0, all: 0 };
+  const counts: Record<View, number> = { live: 0, pending: 0, failed: 0, manual: manualCount, all: 0 };
+  let codVerify = 0;
   for (const row of bucketRows) {
     counts.all += row.count;
-    if ((LIVE_STATUSES as readonly string[]).includes(row.status))
-      counts.live += row.count;
-    else if ((PENDING_STATUSES as readonly string[]).includes(row.status))
-      counts.pending += row.count;
-    else if ((FAILED_STATUSES as readonly string[]).includes(row.status))
-      counts.failed += row.count;
+    const bucket = bucketOfStatus(row.status);
+    if (bucket !== "other") counts[bucket] += row.count;
+    if (row.status === "PENDING_COD_VERIFICATION") codVerify = row.count;
   }
-
-  // Manual orders count — cuts across status, so it's a separate query.
-  const [{ count: manualCount }] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(orders)
-    .where(
-      and(
-        inArray(orders.siteId, visibleSiteIds),
-        eq(orders.createdVia, "ADMIN_MANUAL"),
-      ),
-    );
-  counts.manual = manualCount;
-
-  // Build the filter list:
-  //   - always: scope to the admin's sites
-  //   - if view ≠ all: scope to that view's status set
-  //   - if q: match order id OR a field inside the shipping_address JSONB.
-  //           Drizzle has no first-class JSONB helper, so we use raw SQL via
-  //           `sql` template — parameterised, no string interpolation.
-  const conditions = [inArray(orders.siteId, visibleSiteIds)];
-  if (view === "live")
-    conditions.push(inArray(orders.status, [...LIVE_STATUSES]));
-  else if (view === "pending")
-    conditions.push(inArray(orders.status, [...PENDING_STATUSES]));
-  else if (view === "failed")
-    conditions.push(inArray(orders.status, [...FAILED_STATUSES]));
-  else if (view === "manual")
-    conditions.push(eq(orders.createdVia, "ADMIN_MANUAL"));
-  // view === "all" → no status filter
-  if (q) {
-    const like = `%${q}%`;
-    conditions.push(
-      or(
-        sql`${orders.id} ILIKE ${like}`,
-        sql`${orders.shippingAddress}->>'fullName' ILIKE ${like}`,
-        sql`${orders.shippingAddress}->>'email' ILIKE ${like}`,
-        sql`${orders.shippingAddress}->>'phone' ILIKE ${like}`,
-      )!,
-    );
-  }
-
-  // Fetch PAGE_SIZE + 1 so we know whether a next page exists without a second
-  // count query. The extra row (if any) is sliced off before rendering.
-  const fetched = await db
-    .select()
-    .from(orders)
-    .where(and(...conditions))
-    .orderBy(desc(orders.placedAt))
-    .limit(PAGE_SIZE + 1)
-    .offset(offset);
 
   const hasNext = fetched.length > PAGE_SIZE;
   const rows = hasNext ? fetched.slice(0, PAGE_SIZE) : fetched;
-  const hasPrev = page > 1;
-  const rangeStart = rows.length === 0 ? 0 : offset + 1;
-  const rangeEnd = offset + rows.length;
+  const shown = `Showing ${fmt(offset + 1)}–${fmt(offset + rows.length)}`;
+  // The total is only known for an unfiltered view (the tab count).
+  const summary = filtered ? `${shown}${hasNext ? "+" : ""}` : `${shown} of ${fmt(counts[view])}`;
+  const context = q
+    ? `Results for “${q}”`
+    : `${fmt(counts.live)} live · ${fmt(toShip)} to ship · ${fmt(codVerify)} COD to verify`;
 
   return (
-    <div className="space-y-3 sm:space-y-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="font-display text-xl sm:text-3xl font-bold text-brand-ink">
-            Orders
-          </h1>
-          <p className="text-xs sm:text-sm text-brand-ink-soft mt-0.5 sm:mt-1">
-            {q
-              ? `Search results for "${q}" — showing ${rangeStart}–${rangeEnd}${
-                  hasNext ? "+" : ""
-                }`
-              : `Showing ${rangeStart}–${rangeEnd} of ${counts[view]} ${view === "all" ? "total" : view}`}
-          </p>
-        </div>
-        <Link
-          href="/admin/orders/new"
-          className="shrink-0 inline-flex items-center gap-1.5 bg-brand-red hover:bg-brand-red-hover text-white px-3 py-2 sm:px-4 sm:py-2.5 rounded-xl text-xs sm:text-sm font-semibold"
-        >
-          <Plus size={14} />
-          <span className="hidden sm:inline">New manual order</span>
-          <span className="sm:hidden">New</span>
-        </Link>
-      </div>
+    <>
+      <PageHeader
+        title="Orders"
+        description={<span className="block truncate">{context}</span>}
+        actions={
+          <>
+            {/* Plain <a download>: a real file download, not a client navigation. */}
+            <a
+              href="/api/admin/export?dataset=orders"
+              download
+              title="Download all orders as CSV"
+              className={buttonClass({ className: "max-md:w-11 max-md:px-0" })}
+            >
+              <Download size={15} aria-hidden />
+              <span className="max-md:sr-only">Export</span>
+            </a>
+            <ButtonLink href="/admin/orders/new" variant="primary" className="max-sm:w-11 max-sm:px-0" icon={<Plus size={15} aria-hidden />}>
+              <span className="max-sm:sr-only">New manual order</span>
+            </ButtonLink>
+          </>
+        }
+      />
 
-      {/* Search bar — preserves the current view + site. Submitting an empty
-          q clears the search. */}
-      <form
-        action="/admin/orders"
-        method="GET"
-        className="bg-white rounded-2xl border border-brand-line p-1.5 flex items-center gap-1.5"
-      >
-        {view !== "live" && <input type="hidden" name="view" value={view} />}
-        <Search size={16} className="text-brand-ink-soft ml-2 shrink-0" />
-        <input
-          type="search"
-          name="q"
+      <Tabs
+        ariaLabel="Order views"
+        active={view}
+        items={VIEWS.map((v) => ({ key: v.key, label: v.label, count: counts[v.key], href: ordersHref({ ...state, view: v.key }) }))}
+      />
+
+      <div className="mt-4 flex flex-col gap-2 md:flex-row md:items-center">
+        <SearchForm
+          action="/admin/orders"
           defaultValue={q}
-          placeholder="Search by order ID, name, phone, or email…"
-          className="flex-1 min-w-0 px-2 py-1.5 sm:py-2 text-sm text-brand-ink placeholder:text-brand-ink-soft focus:outline-none bg-transparent"
+          placeholder="Search order, name, phone or AWB"
+          keep={{ view: view === "live" ? undefined : view, method, range }}
+          clearHref={ordersHref({ ...state, q: "" })}
+          className="max-md:flex-none md:max-w-lg"
         />
-        {q && (
-          <Link
-            href={`/admin/orders${view !== "live" ? `?view=${view}` : ""}`}
-            className="text-xs text-brand-ink-soft hover:text-brand-ink px-2"
-          >
-            Clear
-          </Link>
-        )}
-        <button
-          type="submit"
-          aria-label="Search"
-          className="bg-brand-ink text-white text-xs font-semibold uppercase tracking-widest px-2.5 py-2 sm:px-3 rounded-xl"
-        >
-          <Search size={14} className="sm:hidden" />
-          <span className="hidden sm:inline">Search</span>
-        </button>
-      </form>
-
-      {/* View tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto overflow-y-hidden no-scrollbar">
-        <ViewChip
-          href={buildHref({ view: "live" })}
-          label="Live"
-          sub="Paid + COD + in-fulfilment"
-          count={counts.live}
-          active={view === "live"}
-        />
-        <ViewChip
-          href={buildHref({ view: "pending" })}
-          label="Pending"
-          sub="Started checkout, payment open"
-          count={counts.pending}
-          active={view === "pending"}
-        />
-        <ViewChip
-          href={buildHref({ view: "failed" })}
-          label="Failed"
-          sub="Cancelled, failed, refunded, returned"
-          count={counts.failed}
-          active={view === "failed"}
-          danger
-        />
-        <ViewChip
-          href={buildHref({ view: "manual" })}
-          label="Manual"
-          sub="Created by an admin (any status)"
-          count={counts.manual}
-          active={view === "manual"}
-        />
-        <ViewChip
-          href={buildHref({ view: "all" })}
-          label="All"
-          sub="Everything"
-          count={counts.all}
-          active={view === "all"}
-        />
+        <UrlFilters filters={FILTERS} />
       </div>
 
-      <div className="bg-white rounded-2xl border border-brand-line overflow-hidden">
+      <Panel className="mt-4">
         {rows.length === 0 ? (
-          <div className="px-4 py-10 sm:px-5 sm:py-16 text-center">
-            <Package size={32} className="text-brand-ink-soft mx-auto mb-2" />
-            <p className="text-sm text-brand-ink-soft">
-              {page > 1
-                ? "You've reached the end — no more orders on this page."
-                : q
-                  ? `No orders match "${q}".`
-                  : view === "live"
-                    ? "No live orders. Paid orders will appear here as customers check out."
-                    : view === "failed"
-                      ? "No failed orders. Nothing to follow up on — clean slate."
-                      : view === "pending"
-                        ? "No pending orders. UPI carts in progress will appear here."
-                        : "No orders yet."}
-            </p>
-            {page > 1 && (
-              <Link
-                href={buildPageHref({ view, q, page: page - 1 })}
-                className="inline-block mt-3 text-xs font-semibold text-brand-red hover:underline"
-              >
-                ← Back to previous page
-              </Link>
-            )}
-          </div>
+          <ListEmpty page={page} state={state} filtered={filtered} />
         ) : (
-          <ul className="divide-y divide-brand-line">
-            {rows.map((o) => {
-              const addr = o.shippingAddress as {
-                fullName?: string;
-                phone?: string;
-                pincode?: string;
-              };
-              return (
-                <li key={o.id}>
-                  <Link
-                    href={`/admin/orders/${o.id}`}
-                    className="flex items-start gap-3 sm:gap-4 px-3 py-2.5 sm:px-5 sm:py-4 hover:bg-brand-cream transition-colors"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                        <span className="font-mono font-semibold text-brand-ink text-[13px] sm:text-base">
-                          {o.id}
-                        </span>
-                        <StatusBadge status={o.status} />
-                        {/* Site chip is desktop-only — single combined store */}
-                        <span className="hidden sm:inline text-[10px] font-mono uppercase tracking-widest text-brand-ink-soft border border-brand-line px-1.5 py-0.5 rounded">
-                          {o.siteId}
-                        </span>
-                      </div>
-                      <div className="text-[13px] sm:text-sm text-brand-ink mt-1 sm:mt-1.5 truncate">
-                        {addr.fullName ?? "—"}
-                        {addr.phone && (
-                          <span className="text-brand-ink-soft font-mono ml-2">
-                            {addr.phone}
-                          </span>
-                        )}
-                        {/* Pincode is desktop-only — detail page has the full address */}
-                        {addr.pincode && (
-                          <span className="hidden sm:inline text-brand-ink-soft font-mono ml-2">
-                            {addr.pincode}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] sm:text-xs text-brand-ink-soft mt-0.5 sm:mt-1">
-                        {formatIST(o.placedAt)}
-                        {" · "}
-                        {o.paymentMethod}
-                        {o.paymentStatus !== "PENDING" &&
-                          ` · ${o.paymentStatus}`}
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="font-semibold text-brand-ink tabular-nums text-sm sm:text-base">
-                        {formatINR(o.totalInr)}
-                      </div>
-                      {/* AWB is desktop-only — it crowded the price column */}
-                      {o.awbCode && (
-                        <div className="hidden sm:block text-[10px] font-mono text-brand-ink-soft mt-0.5">
-                          AWB {o.awbCode}
-                        </div>
-                      )}
-                    </div>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
+          <>
+            <OrdersTable rows={rows} />
+            <OrderCards rows={rows} />
+            <Pagination
+              summary={summary}
+              prevHref={page > 1 ? ordersHref({ ...state, page: page - 1 }) : null}
+              nextHref={hasNext ? ordersHref({ ...state, page: page + 1 }) : null}
+            />
+          </>
         )}
-      </div>
-
-      {/* Pagination — Prev/Next preserve the current view + search query. */}
-      {(hasPrev || hasNext) && (
-        <div className="flex items-center justify-between gap-3">
-          {hasPrev ? (
-            <Link
-              href={buildPageHref({ view, q, page: page - 1 })}
-              className="inline-flex items-center gap-1 bg-white border border-brand-line hover:border-brand-ink text-brand-ink text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
-            >
-              <ChevronLeft size={16} /> Previous
-            </Link>
-          ) : (
-            <span />
-          )}
-          <span className="text-xs font-mono text-brand-ink-soft">
-            Page {page}
-          </span>
-          {hasNext ? (
-            <Link
-              href={buildPageHref({ view, q, page: page + 1 })}
-              className="inline-flex items-center gap-1 bg-white border border-brand-line hover:border-brand-ink text-brand-ink text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
-            >
-              Next <ChevronRight size={16} />
-            </Link>
-          ) : (
-            <span />
-          )}
-        </div>
-      )}
-    </div>
+      </Panel>
+    </>
   );
 }
 
-/** Build a list URL preserving view + search query for a given page. */
-function buildPageHref(input: { view: View; q: string; page: number }): string {
-  const parts: string[] = [];
-  if (input.view !== "live") parts.push(`view=${input.view}`);
-  if (input.q) parts.push(`q=${encodeURIComponent(input.q)}`);
-  if (input.page > 1) parts.push(`page=${input.page}`);
-  return `/admin/orders${parts.length ? "?" + parts.join("&") : ""}`;
-}
+// ── Table (md+) ─────────────────────────────────────────────────────────────
 
-function buildHref(input: { view: View }): string {
-  const parts: string[] = [];
-  if (input.view !== "live") parts.push(`view=${input.view}`);
-  return `/admin/orders${parts.length ? "?" + parts.join("&") : ""}`;
-}
-
-function ViewChip({
-  href,
-  label,
-  sub,
-  count,
-  active,
-  danger,
-}: {
-  href: string;
-  label: string;
-  sub: string;
-  count: number;
-  active: boolean;
-  danger?: boolean;
-}) {
+function OrdersTable({ rows }: { rows: OrderRow[] }) {
   return (
-    <Link
-      href={href}
-      className={`shrink-0 inline-flex flex-col items-start gap-0.5 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full sm:rounded-2xl transition-colors sm:min-w-[140px] ${
-        active
-          ? danger
-            ? "bg-brand-red text-white"
-            : "bg-brand-ink text-white"
-          : "bg-white border border-brand-line text-brand-ink-soft hover:text-brand-ink"
-      }`}
-    >
-      <div className="flex items-center gap-1.5 w-full">
-        <span className="text-[13px] sm:text-sm font-semibold">{label}</span>
-        <span
-          className={`tabular-nums text-xs ${active ? "text-white/70" : "text-brand-ink-soft"}`}
-        >
-          {count}
-        </span>
-      </div>
-      {/* Explainer sub-line is desktop-only — mobile chips are slim pills */}
-      <span
-        className={`hidden sm:block text-[10px] font-mono uppercase tracking-widest truncate ${
-          active ? "text-white/60" : "text-brand-ink-soft"
-        }`}
-      >
-        {sub}
-      </span>
-    </Link>
+    <Table className="max-md:hidden">
+      <THead>
+        <TH className="pl-4 pr-3">Order</TH>
+        <TH className="px-3">Date</TH>
+        <TH className="px-3">Customer</TH>
+        <TH className="hidden px-3 lg:table-cell">Payment</TH>
+        <TH className="px-3">Status</TH>
+        <TH className="hidden px-3 xl:table-cell">Shipping</TH>
+        <TH align="right" className="px-3">Amount</TH>
+        <TH className="pl-1 pr-2"><span className="sr-only">Actions</span></TH>
+      </THead>
+      <TBody>
+        {rows.map((o) => {
+          const c = customerOf(o.shippingAddress);
+          return (
+            <TR key={o.id}>
+              <TD nowrap className="pl-4 pr-3">
+                <RowLink href={`/admin/orders/${o.id}`} className="font-mono">{o.id}</RowLink>
+                {o.createdVia === "ADMIN_MANUAL" && <div className="mt-1"><Tag>Manual</Tag></div>}
+              </TD>
+              <TD nowrap className="px-3 tabular-nums text-brand-ink-soft">{formatDateTimeShort(o.placedAt)}</TD>
+              {/* 28% + max-w-0: flexible but capped (wide screens spread the rest); truncates. */}
+              <TD className="w-[28%] max-w-0 px-3">
+                <div className="truncate font-medium" title={c.name}>{c.name}</div>
+                {c.contact && <div className="truncate font-mono text-xs text-admin-muted">{c.contact}</div>}
+              </TD>
+              <TD nowrap className="hidden px-3 lg:table-cell">
+                <div>{methodLabel(o.paymentMethod)}</div>
+                <div className="text-xs text-admin-muted">{paymentStateMeta(o.paymentMethod, o.paymentStatus).label}</div>
+              </TD>
+              <TD nowrap className="px-3"><OrderStatusBadge status={o.status} /></TD>
+              <TD className="hidden px-3 xl:table-cell">
+                {!o.courierName && !o.awbCode && <span className="text-admin-muted">—</span>}
+                {o.courierName && <div className="max-w-36 truncate" title={o.courierName}>{o.courierName}</div>}
+                {o.awbCode && <div className="max-w-36 truncate font-mono text-xs text-admin-muted">{o.awbCode}</div>}
+              </TD>
+              <TD align="right" nowrap className="px-3 font-semibold">{formatINR(o.totalInr)}</TD>
+              <TD interactive className="pl-1 pr-2">
+                <OrderRowActions orderId={o.id} phone={c.phone || null} trackingUrl={o.trackingUrl} />
+              </TD>
+            </TR>
+          );
+        })}
+      </TBody>
+    </Table>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    PENDING: "bg-gold/10 text-gold",
-    PENDING_COD_VERIFICATION: "bg-amber-100 text-amber-800",
-    PAID: "bg-success/10 text-success",
-    PACKED: "bg-success/10 text-success",
-    SHIPPED: "bg-blue-100 text-blue-700",
-    DELIVERED: "bg-success/15 text-success",
-    CANCELLED: "bg-brand-red/10 text-brand-red",
-    REFUNDED: "bg-brand-red/10 text-brand-red",
-    FAILED: "bg-brand-red/10 text-brand-red",
-    ABANDONED: "bg-brand-ink-soft/10 text-brand-ink-soft",
-    RETURNED: "bg-brand-red/10 text-brand-red",
-  };
+// ── Row cards (phones) ──────────────────────────────────────────────────────
+
+function OrderCards({ rows }: { rows: OrderRow[] }) {
   return (
-    <span
-      className={`${styles[status] ?? "bg-brand-line text-brand-ink"} text-[10px] font-mono uppercase tracking-widest font-semibold px-2 py-0.5 rounded-full`}
-    >
-      {status}
-    </span>
+    <ul className="divide-y divide-admin-line md:hidden">
+      {rows.map((o) => (
+        <li key={o.id}>
+          <Link href={`/admin/orders/${o.id}`} className="flex items-center gap-3 px-4 py-3 transition-colors active:bg-admin-subtle">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="truncate font-mono text-[13px] font-semibold text-brand-ink">{o.id}</span>
+                {o.createdVia === "ADMIN_MANUAL" && <Tag className="shrink-0">Manual</Tag>}
+                <span className="ml-auto shrink-0 pl-2 text-sm font-semibold tabular-nums text-brand-ink">
+                  {formatINR(o.totalInr)}
+                </span>
+              </div>
+              <p className="mt-0.5 truncate text-sm text-brand-ink">{customerOf(o.shippingAddress).name}</p>
+              <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                <OrderStatusBadge status={o.status} />
+                <span className="truncate text-xs text-admin-muted">{methodLabel(o.paymentMethod)}</span>
+              </div>
+              <p className="mt-1.5 truncate text-xs tabular-nums text-admin-muted">
+                {formatDateTimeShort(o.placedAt)}
+                {o.awbCode && <> · AWB <span className="font-mono">{o.awbCode}</span></>}
+              </p>
+            </div>
+            <ChevronRight size={16} aria-hidden className="shrink-0 text-admin-muted" />
+          </Link>
+        </li>
+      ))}
+    </ul>
   );
+}
+
+// ── Empty states ────────────────────────────────────────────────────────────
+
+function ListEmpty({ page, state, filtered }: { page: number; state: ListState; filtered: boolean }) {
+  if (page > 1) {
+    const back = <ButtonLink href={ordersHref(state)} size="sm">Back to page 1</ButtonLink>;
+    return <EmptyState icon={Inbox} title="You've reached the end" description="There are no more orders past this page." action={back} />;
+  }
+  if (filtered) {
+    const clear = <ButtonLink href={ordersHref({ view: state.view })} size="sm">Clear search and filters</ButtonLink>;
+    const title = state.q ? `No orders match “${state.q}”` : "No orders match these filters";
+    return <EmptyState icon={SearchX} title={title} description="Try a different search or clear the filters." action={clear} />;
+  }
+  const v = VIEWS.find((x) => x.key === state.view) ?? VIEWS[0];
+  return <EmptyState icon={Package} title={v.emptyTitle} description={v.emptyText} />;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+const DAY_MS = 86_400_000;
+const IST_OFFSET_MS = 19_800_000; // UTC+05:30
+
+/** Lower bound on placedAt: "today" = since midnight IST; the rest are rolling windows. */
+function placedSince(range: Range | ""): Date | null {
+  if (!range) return null;
+  const now = Date.now();
+  if (range === "today") return new Date(Math.floor((now + IST_OFFSET_MS) / DAY_MS) * DAY_MS - IST_OFFSET_MS);
+  return new Date(now - RANGE_DAYS[range] * DAY_MS);
+}
+
+/**
+ * Match order id, AWB, or a field inside the shipping_address JSONB. Drizzle
+ * has no JSONB helper, so this is raw `sql` — every value is a bound
+ * parameter, never interpolated into the query text.
+ */
+function searchCondition(q: string): SQL {
+  const like = `%${q}%`;
+  return or(
+    sql`${orders.id} ILIKE ${like}`,
+    sql`${orders.shippingAddress}->>'fullName' ILIKE ${like}`,
+    sql`${orders.shippingAddress}->>'email' ILIKE ${like}`,
+    sql`${orders.shippingAddress}->>'phone' ILIKE ${like}`,
+    sql`${orders.shippingAddress}->>'pincode' ILIKE ${like}`,
+    sql`${orders.awbCode} ILIKE ${like}`,
+  )!;
+}
+
+/** List URL; the default view and page 1 are omitted. */
+function ordersHref(s: Partial<ListState> & { page?: number }): string {
+  const sp = new URLSearchParams();
+  if (s.view && s.view !== "live") sp.set("view", s.view);
+  if (s.q) sp.set("q", s.q);
+  if (s.method) sp.set("method", s.method);
+  if (s.range) sp.set("range", s.range);
+  if (s.page && s.page > 1) sp.set("page", String(s.page));
+  const qs = sp.toString();
+  return qs ? `/admin/orders?${qs}` : "/admin/orders";
+}
+
+/** Display fields from the shipping-address snapshot (JSONB — shape can drift). */
+function customerOf(address: unknown) {
+  const a = (address && typeof address === "object" ? address : {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" || typeof v === "number" ? String(v).trim() : "");
+  const phone = text(a.phone);
+  const contact = [phone && formatPhone(phone), text(a.pincode)].filter(Boolean).join(" · ");
+  return { name: text(a.fullName) || "—", phone, contact };
+}
+
+/** `raw` if it's one of `allowed`, else "" (unknown URL values are ignored). */
+function pick<T extends string>(allowed: readonly T[], raw: string): T | "" {
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : "";
+}
+
+function first(v: string | string[] | undefined): string {
+  return (Array.isArray(v) ? v[0] : v) ?? "";
+}
+
+function methodLabel(method: string): string {
+  return PAYMENT_METHOD_LABEL[method] ?? method;
+}
+
+function fmt(n: number): string {
+  return n.toLocaleString("en-IN");
 }

@@ -17,7 +17,9 @@
     "db:seed": "node --env-file=.env.local --import tsx src/db/seed.ts",
     "db:seed-inventory": "node --env-file=.env.local --import tsx src/db/seed-inventory.ts",
     "admin:reset-password": "node --env-file=.env.local --import tsx scripts/reset-admin-password.ts",
-    "verify:analytics": "node --import tsx scripts/verify-analytics-math.ts && node --import tsx scripts/verify-analytics-ranges.ts && node --import tsx scripts/verify-analytics-commerce.ts && node --import tsx scripts/verify-analytics-integrations.ts && node --import tsx scripts/verify-tracking-integrity.ts"
+    "verify:analytics": "node --import tsx scripts/verify-analytics-math.ts && node --import tsx scripts/verify-analytics-ranges.ts && node --import tsx scripts/verify-analytics-commerce.ts && node --import tsx scripts/verify-analytics-integrations.ts && node --import tsx scripts/verify-tracking-integrity.ts",
+    "dev:db": "npx -y @electric-sql/pglite-socket@0.2.11 --db=./.devdb --port=54329 --max-connections=4",
+    "dev:db:setup": "node --env-file=.env.local --import tsx scripts/dev-db-setup.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.3",

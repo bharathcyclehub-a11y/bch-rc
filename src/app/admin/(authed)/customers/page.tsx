@@ -1,442 +1,529 @@
 import Link from "next/link";
-import { ChevronLeft, ChevronRight, Search, Users } from "lucide-react";
-import { and, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { ChevronRight, SearchX, Users } from "lucide-react";
+import { and, asc, desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { customers, orders } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
-import {
-  PAID_STATUSES,
-  PENDING_STATUSES,
-  type OrderStatus,
-} from "@/lib/order-status";
-import { formatINR } from "@/lib/utils";
+import { PAID_STATUSES, PENDING_STATUSES, VALID_ORDER_STATUSES, type OrderStatus } from "@/lib/order-status";
+import { customerSegmentOf, HIGH_VALUE_INR, INACTIVE_DAYS, NEW_CUSTOMER_DAYS } from "@/lib/admin/status";
+import { formatMonthYear, formatPhone, formatRelative, plural, requestTime } from "@/lib/admin/format";
+import { cn, formatINR } from "@/lib/utils";
+import { Avatar } from "@/components/admin/Avatar";
+import { SegmentBadge } from "@/components/admin/Badge";
+import { ButtonLink } from "@/components/admin/Button";
+import { EmptyState } from "@/components/admin/EmptyState";
+import { UrlFilters, type FilterDef } from "@/components/admin/Filters";
+import { PageHeader } from "@/components/admin/PageHeader";
+import { Pagination } from "@/components/admin/Pagination";
+import { Panel } from "@/components/admin/Panel";
+import { SearchForm } from "@/components/admin/SearchForm";
+import { RowLink, Table, TBody, TD, TH, THead, TR } from "@/components/admin/Table";
+import { Tabs } from "@/components/admin/Tabs";
+import { CustomerRowActions } from "./CustomerRowActions";
 import { CustomersExport } from "./CustomersExport";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
+const DAY_MS = 86_400_000;
+
+const SEGMENTS = ["all", "repeat", "high", "new", "inactive"] as const;
+type Segment = (typeof SEGMENTS)[number];
+
+const SORTS = ["ltv", "orders", "recent", "newest"] as const;
+type Sort = (typeof SORTS)[number];
+
+const SEGMENT_LABEL: Record<Segment, string> = {
+  all: "All",
+  repeat: "Repeat",
+  high: "High value",
+  new: `New (${NEW_CUSTOMER_DAYS} days)`,
+  inactive: `Inactive (${INACTIVE_DAYS}+ days)`,
+};
+
+const SORT_PHRASE: Record<Sort, string> = {
+  ltv: "ranked by lifetime value",
+  orders: "ranked by orders",
+  recent: "sorted by last order",
+  newest: "newest first",
+};
+
+const SORT_FILTER: FilterDef = {
+  key: "sort",
+  label: "Sort",
+  anyValue: "ltv",
+  options: [
+    { value: "ltv", label: "Lifetime value" },
+    { value: "orders", label: "Orders" },
+    { value: "recent", label: "Last order" },
+    { value: "newest", label: "Newest" },
+  ],
+};
 
 /**
- * Customer views — the fix for "429 customers" being a meaningless number.
- *
- * A `customers` row is minted on the FIRST CHECKOUT ATTEMPT (upsert by phone in
- * /api/orders/create), not on the first payment. So the raw table counts anyone
- * who ever typed a phone number into checkout — including people whose card
- * failed and people who abandoned the cart. Before this, the list joined ALL
- * order rows with no status filter, so "Spent" summed failed/abandoned/returned
- * attempts as if they were revenue: the top "spender" (₹21,394) turned out to
- * have zero paid orders.
- *
- * Each view scopes BOTH the customer set and the Orders/Spent columns to one
- * status bucket, so "Spent" always means "money in this bucket" and never mixes
- * banked revenue with attempts. `paid` is the default because that's the only
- * view where Spent is true lifetime value.
+ * Status views: narrow the list to customers with at least one order in a
+ * status bucket (e.g. who failed payment, who abandoned). Lifetime value stays
+ * paid-only, so a Failed-view customer can correctly show ₹0.
  */
 const VIEWS = {
-  paid: {
-    label: "Paid",
-    sub: "Real revenue · paid + in-fulfilment",
-    statuses: [...PAID_STATUSES],
-  },
-  pending: {
-    label: "Pending",
-    sub: "Checkout open, not yet paid",
-    statuses: [...PENDING_STATUSES],
-  },
-  failed: {
-    label: "Failed",
-    sub: "Payment attempted, declined",
-    statuses: ["FAILED"],
-    danger: true,
-  },
-  cancelled: {
-    label: "Cancelled",
-    sub: "Cancelled before dispatch",
-    statuses: ["CANCELLED"],
-    danger: true,
-  },
-  returned: {
-    label: "Returned",
-    sub: "Shipped, came back (RTO)",
-    statuses: ["RETURNED"],
-    danger: true,
-  },
-  refunded: {
-    label: "Refunded",
-    sub: "Money returned to customer",
-    statuses: ["REFUNDED"],
-    danger: true,
-  },
-  abandoned: {
-    label: "Abandoned",
-    sub: "Left the cart, never paid",
-    statuses: ["ABANDONED"],
-    danger: true,
-  },
-  all: {
-    label: "All",
-    sub: "Everyone who gave a phone number",
-    statuses: null, // no status filter — every order row, and every customer
-  },
-} as const satisfies Record<
-  string,
-  {
-    label: string;
-    sub: string;
-    statuses: readonly OrderStatus[] | null;
-    danger?: boolean;
-  }
->;
+  all: { label: "Any status", statuses: null },
+  paid: { label: "Paid", statuses: PAID_STATUSES },
+  pending: { label: "Pending", statuses: PENDING_STATUSES },
+  failed: { label: "Failed", statuses: ["FAILED"] },
+  cancelled: { label: "Cancelled", statuses: ["CANCELLED"] },
+  returned: { label: "Returned", statuses: ["RETURNED"] },
+  refunded: { label: "Refunded", statuses: ["REFUNDED"] },
+  abandoned: { label: "Abandoned", statuses: ["ABANDONED"] },
+} as const satisfies Record<string, { label: string; statuses: readonly OrderStatus[] | null }>;
+type View = keyof typeof VIEWS;
+const VIEW_KEYS = Object.keys(VIEWS) as View[];
 
-type ViewKey = keyof typeof VIEWS;
+const VIEW_FILTER: FilterDef = {
+  key: "view",
+  label: "Status",
+  anyValue: "all",
+  options: VIEW_KEYS.map((v) => ({ value: v, label: VIEWS[v].label })),
+};
 
-const VIEW_ORDER = [
-  "paid",
-  "pending",
-  "failed",
-  "cancelled",
-  "returned",
-  "refunded",
-  "abandoned",
-  "all",
-] as const satisfies readonly ViewKey[];
+type ListState = { q: string; segment: Segment; sort: Sort; view: View };
+type SearchParams = Record<string, string | string[] | undefined>;
 
-const DEFAULT_VIEW: ViewKey = "paid";
+// ── SQL building blocks ─────────────────────────────────────────────────────
+// Every value below is a bound parameter (status names, cutoffs, thresholds);
+// nothing user-supplied is interpolated into the query text.
 
-function isViewKey(v: string | undefined): v is ViewKey {
-  return v !== undefined && v in VIEWS;
+/** `array[$1, $2, …]::text[]` of order statuses. */
+function statusArray(list: readonly string[]): SQL {
+  return sql`array[${sql.join(
+    list.map((s) => sql`${s}`),
+    sql`, `,
+  )}]::text[]`;
 }
 
-export default async function AdminCustomers({
-  searchParams,
-}: {
-  searchParams: Promise<{ q?: string; page?: string; view?: string }>;
-}) {
+const IS_VALID = sql`${orders.status}::text = ANY(${statusArray(VALID_ORDER_STATUSES)})`;
+const IS_PAID = sql`${orders.status}::text = ANY(${statusArray(PAID_STATUSES)})`;
+
+// Per-customer aggregates over the (site-scoped) left-joined orders. With no
+// matching orders the joined columns are NULL, so FILTER drops them: count → 0,
+// sum → NULL (coalesced to 0), max → NULL.
+const ORDER_COUNT = sql`count(${orders.id}) FILTER (WHERE ${IS_VALID})`;
+const PAID_COUNT = sql`count(${orders.id}) FILTER (WHERE ${IS_PAID})`;
+const LTV = sql`coalesce(sum(${orders.totalInr}) FILTER (WHERE ${IS_PAID}), 0)`;
+const LAST_ORDER = sql`max(${orders.placedAt}) FILTER (WHERE ${IS_VALID})`;
+
+/** HAVING for the status view: at least one order in the bucket. */
+function viewHaving(view: View): SQL | undefined {
+  const statuses = VIEWS[view].statuses;
+  if (!statuses) return undefined;
+  return sql`count(${orders.id}) FILTER (WHERE ${orders.status}::text = ANY(${statusArray(statuses)})) > 0`;
+}
+
+type SegmentCols = { orderCount: SQL.Aliased | SQL; ltv: SQL.Aliased | SQL; lastOrderAt: SQL.Aliased | SQL };
+
+/**
+ * The single definition of each aggregate segment. Used as HAVING on the page
+ * query (over the aggregate expressions) and as count(*) FILTER in the tab
+ * counts (over the subquery's columns), so a tab count always equals the
+ * number of rows its list shows. "new" is a plain column test (WHERE).
+ */
+function segmentHaving(segment: Segment, c: SegmentCols, inactiveCutoffIso: string): SQL | undefined {
+  switch (segment) {
+    case "repeat":
+      return sql`${c.orderCount} >= 2`;
+    case "high":
+      return sql`${c.ltv} >= ${HIGH_VALUE_INR}`;
+    case "inactive":
+      return sql`(${c.orderCount} >= 1 AND ${c.lastOrderAt} < ${inactiveCutoffIso})`;
+    default:
+      return undefined;
+  }
+}
+
+function orderByFor(sort: Sort): SQL[] {
+  const tiebreak = [desc(customers.createdAt), asc(customers.id)];
+  switch (sort) {
+    case "orders":
+      return [desc(ORDER_COUNT), ...tiebreak];
+    case "recent":
+      return [sql`${LAST_ORDER} desc nulls last`, ...tiebreak];
+    case "newest":
+      return tiebreak;
+    default:
+      return [desc(LTV), ...tiebreak];
+  }
+}
+
+/** Name / phone / email match. Also matches a phone typed the way we display it ("98201 44102", "+91 …"). */
+function searchCondition(q: string): SQL | undefined {
+  if (!q) return undefined;
+  const conds: SQL[] = [
+    ilike(customers.name, `%${q}%`),
+    ilike(customers.phone, `%${q}%`),
+    ilike(customers.email, `%${q}%`),
+  ];
+  const digits = q.replace(/\D/g, "");
+  const tail = digits.length > 10 ? digits.slice(-10) : digits;
+  if (tail.length >= 4 && tail !== q) conds.push(ilike(customers.phone, `%${tail}%`));
+  return or(...conds);
+}
+
+/** Request clock + the segment cutoffs derived from it. */
+function requestClock() {
+  const now = requestTime();
+  return {
+    now,
+    newCutoffIso: new Date(now - NEW_CUSTOMER_DAYS * DAY_MS).toISOString(),
+    inactiveCutoffIso: new Date(now - INACTIVE_DAYS * DAY_MS).toISOString(),
+  };
+}
+
+// ── Page ────────────────────────────────────────────────────────────────────
+
+export default async function AdminCustomers({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await requireAdmin();
   const sp = await searchParams;
 
-  const q = (sp.q ?? "").trim();
-  const view: ViewKey = isViewKey(sp.view) ? sp.view : DEFAULT_VIEW;
-  const statuses = VIEWS[view].statuses;
-  const page = Math.max(1, Number.parseInt(sp.page ?? "1", 10) || 1);
+  const state: ListState = {
+    q: first(sp.q).trim(),
+    segment: pick(SEGMENTS, first(sp.segment), "all"),
+    sort: pick(SORTS, first(sp.sort), "ltv"),
+    view: pick(VIEW_KEYS, first(sp.view), "all"),
+  };
+  const page = Math.min(100_000, Math.max(1, Number.parseInt(first(sp.page), 10) || 1));
   const offset = (page - 1) * PAGE_SIZE;
+  const { now, newCutoffIso, inactiveCutoffIso } = requestClock();
 
-  // Server-side search across the three identity columns. Nullable columns
-  // (name/email) just don't match on NULL, which is the behaviour we want.
-  const searchWhere = q
-    ? or(
-        ilike(customers.name, `%${q}%`),
-        ilike(customers.phone, `%${q}%`),
-        ilike(customers.email, `%${q}%`),
-      )
-    : undefined;
+  // Orders are joined only for the admin's sites; customers themselves are global.
+  const joinOn = and(eq(orders.customerId, customers.id), inArray(orders.siteId, ctx.siteIds));
+  const searchWhere = searchCondition(state.q);
+  const isNew = sql`${customers.createdAt} >= ${newCutoffIso}`;
 
-  // Join condition for the selected view. INNER join (not left) so a customer
-  // only appears when they actually have an order in this bucket — that's what
-  // makes "Paid" a list of real buyers rather than the whole table with ₹0 rows.
-  const joinOn = and(
-    eq(orders.customerId, customers.id),
-    inArray(orders.siteId, ctx.siteIds),
-    statuses ? inArray(orders.status, [...statuses]) : undefined,
-  );
+  // Searched (but unsegmented) aggregate — the base for the tab counts.
+  const agg = db
+    .select({
+      id: customers.id,
+      createdAt: customers.createdAt,
+      orderCount: ORDER_COUNT.as("order_count"),
+      ltv: LTV.as("ltv"),
+      lastOrderAt: LAST_ORDER.as("last_order_at"),
+    })
+    .from(customers)
+    .leftJoin(orders, joinOn)
+    .where(searchWhere)
+    .groupBy(customers.id)
+    .having(viewHaving(state.view))
+    .as("agg");
 
-  // Per-view customer counts for the tab chips — one pass over orders with
-  // FILTER clauses, same trick the dashboard uses. Respects the search box.
-  const countsFor = (s: readonly OrderStatus[]) =>
-    sql<number>`count(distinct ${orders.customerId}) filter (where ${inArray(
-      orders.status,
-      [...s],
-    )})::int`;
+  const countIf = (cond: SQL | undefined) =>
+    sql<number>`(count(*) FILTER (WHERE ${cond ?? sql`true`}))::int`;
 
-  const [list, [{ total }], [counts], [{ allCustomers }]] = await Promise.all([
+  const [rows, [counts]] = await Promise.all([
     db
       .select({
         id: customers.id,
-        phone: customers.phone,
-        email: customers.email,
         name: customers.name,
-        orderCount: sql<number>`count(${orders.id})::int`,
-        revenue: sql<number>`coalesce(sum(${orders.totalInr}), 0)::int`,
+        email: customers.email,
+        phone: customers.phone,
+        createdAt: customers.createdAt,
+        orderCount: sql<number>`(${ORDER_COUNT})::int`,
+        paidCount: sql<number>`(${PAID_COUNT})::int`,
+        ltv: sql<number>`(${LTV})::int`,
+        lastOrderAt: sql<string | null>`${LAST_ORDER}`,
       })
       .from(customers)
-      .innerJoin(orders, joinOn)
-      .where(searchWhere)
+      .leftJoin(orders, joinOn)
+      .where(and(searchWhere, state.segment === "new" ? isNew : undefined))
       .groupBy(customers.id)
-      // Tiebreak on createdAt so page boundaries stay stable across requests.
-      .orderBy(
-        sql`coalesce(sum(${orders.totalInr}), 0) desc, ${customers.createdAt} desc`,
+      .having(
+        and(
+          segmentHaving(state.segment, { orderCount: ORDER_COUNT, ltv: LTV, lastOrderAt: LAST_ORDER }, inactiveCutoffIso),
+          viewHaving(state.view),
+        ),
       )
+      .orderBy(...orderByFor(state.sort))
       .limit(PAGE_SIZE)
       .offset(offset),
-
-    // Distinct customers in THIS view — the denominator for pagination.
-    statuses
-      ? db
-          .select({ total: sql<number>`count(distinct ${customers.id})::int` })
-          .from(customers)
-          .innerJoin(orders, joinOn)
-          .where(searchWhere)
-      : db
-          .select({ total: sql<number>`count(*)::int` })
-          .from(customers)
-          .where(searchWhere),
-
     db
       .select({
-        paid: countsFor(PAID_STATUSES),
-        pending: countsFor(PENDING_STATUSES),
-        failed: countsFor(["FAILED"]),
-        cancelled: countsFor(["CANCELLED"]),
-        returned: countsFor(["RETURNED"]),
-        refunded: countsFor(["REFUNDED"]),
-        abandoned: countsFor(["ABANDONED"]),
+        all: sql<number>`count(*)::int`,
+        repeat: countIf(segmentHaving("repeat", agg, inactiveCutoffIso)),
+        high: countIf(segmentHaving("high", agg, inactiveCutoffIso)),
+        new: countIf(sql`${agg.createdAt} >= ${newCutoffIso}`),
+        inactive: countIf(segmentHaving("inactive", agg, inactiveCutoffIso)),
       })
-      .from(orders)
-      .innerJoin(customers, eq(orders.customerId, customers.id))
-      .where(and(inArray(orders.siteId, ctx.siteIds), searchWhere)),
-
-    db
-      .select({ allCustomers: sql<number>`count(*)::int` })
-      .from(customers)
-      .where(searchWhere),
+      .from(agg),
   ]);
 
-  const tabCount: Record<ViewKey, number> = {
-    paid: counts?.paid ?? 0,
-    pending: counts?.pending ?? 0,
-    failed: counts?.failed ?? 0,
-    cancelled: counts?.cancelled ?? 0,
-    returned: counts?.returned ?? 0,
-    refunded: counts?.refunded ?? 0,
-    abandoned: counts?.abandoned ?? 0,
-    all: allCustomers ?? 0,
-  };
+  // The tab count for the active segment IS the filtered total: same predicate,
+  // same search, so pagination and the tab badge can never disagree.
+  const total = counts?.[state.segment] ?? 0;
+  const list = rows.map((r) => ({ ...r, lastOrderAt: r.lastOrderAt ? new Date(r.lastOrderAt) : null }));
 
-  const start = total === 0 ? 0 : offset + 1;
+  const start = list.length === 0 ? 0 : offset + 1;
   const end = offset + list.length;
   const hasPrev = page > 1;
-  const hasNext = offset + list.length < total;
+  const hasNext = end < total;
 
-  const buildHref = (next: { view?: ViewKey; page?: number }) => {
-    const v = next.view ?? view;
-    const p = next.page ?? 1;
-    const parts: string[] = [];
-    if (q) parts.push(`q=${encodeURIComponent(q)}`);
-    if (v !== DEFAULT_VIEW) parts.push(`view=${v}`);
-    if (p > 1) parts.push(`page=${p}`);
-    return `/admin/customers${parts.length ? "?" + parts.join("&") : ""}`;
-  };
-
-  const spentLabel = view === "paid" ? "Lifetime value" : "Value at risk";
+  const description = state.q
+    ? `${plural(total, "result")} for “${state.q}”`
+    : `${plural(counts?.all ?? 0, "customer")}${state.view === "all" ? "" : ` with ${VIEWS[state.view].label.toLowerCase()} orders`} · ${plural(counts?.repeat ?? 0, "repeat buyer")} · ${SORT_PHRASE[state.sort]}`;
 
   return (
-    <div className="space-y-3 sm:space-y-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="font-display text-lg sm:text-3xl font-bold text-brand-ink">
-            Customers
-          </h1>
-          <p className="text-sm text-brand-ink-soft mt-1">
-            {q
-              ? `${total} result${total === 1 ? "" : "s"} for "${q}" in ${VIEWS[view].label}`
-              : view === "paid"
-                ? `${total} paying customers, ranked by lifetime value.`
-                : view === "all"
-                  ? `${total} people who reached checkout — most have never paid.`
-                  : `${total} customers with ${VIEWS[view].label.toLowerCase()} orders.`}
-          </p>
-        </div>
-        <CustomersExport />
-      </div>
+    <>
+      <PageHeader title="Customers" description={description} actions={<CustomersExport />} />
 
-      {/* Search — GET form so the query lives in the URL (shareable, back-safe).
-          Submitting resets to page 1 by omitting the page param. The hidden
-          view field keeps you in the tab you were looking at. */}
-      <form
-        action="/admin/customers"
-        method="GET"
-        className="bg-white rounded-2xl border border-brand-line p-1.5 flex items-center gap-1.5"
-      >
-        {view !== DEFAULT_VIEW && (
-          <input type="hidden" name="view" value={view} />
-        )}
-        <Search size={16} className="text-brand-ink-soft ml-2 shrink-0" />
-        <input
-          type="search"
-          name="q"
-          defaultValue={q}
-          placeholder="Search by name, phone, or email…"
-          className="flex-1 px-2 py-2 text-sm text-brand-ink placeholder:text-brand-ink-soft focus:outline-none bg-transparent"
+      <Tabs
+        ariaLabel="Customer segments"
+        active={state.segment}
+        className="mb-4"
+        items={SEGMENTS.map((s) => ({
+          key: s,
+          label: SEGMENT_LABEL[s],
+          count: counts?.[s] ?? 0,
+          href: customersHref({ ...state, segment: s }),
+        }))}
+      />
+
+      <div className="mb-4 flex items-center gap-2">
+        <SearchForm
+          action="/admin/customers"
+          defaultValue={state.q}
+          placeholder="Search name, phone, email"
+          keep={{
+            segment: state.segment === "all" ? undefined : state.segment,
+            sort: state.sort === "ltv" ? undefined : state.sort,
+            view: state.view === "all" ? undefined : state.view,
+          }}
+          clearHref={customersHref({ ...state, q: "" })}
         />
-        {q && (
-          <Link
-            href={buildHref({})}
-            className="text-xs text-brand-ink-soft hover:text-brand-ink px-2"
-          >
-            Clear
-          </Link>
-        )}
-        <button
-          type="submit"
-          className="bg-brand-ink text-white text-xs font-semibold uppercase tracking-widest px-3 py-2 rounded-xl"
-        >
-          Search
-        </button>
-      </form>
-
-      {/* View tabs — same chip language as the Orders board. */}
-      <div className="flex items-center gap-2 overflow-x-auto overflow-y-hidden no-scrollbar">
-        {VIEW_ORDER.map((key) => {
-          const cfg = VIEWS[key];
-          return (
-            <ViewChip
-              key={key}
-              href={buildHref({ view: key })}
-              label={cfg.label}
-              sub={cfg.sub}
-              count={tabCount[key]}
-              active={view === key}
-              danger={"danger" in cfg ? cfg.danger : undefined}
-            />
-          );
-        })}
+        <UrlFilters filters={[VIEW_FILTER, SORT_FILTER]} />
       </div>
 
-      <div className="bg-white rounded-2xl border border-brand-line overflow-x-auto no-scrollbar overflow-y-hidden">
+      <Panel>
         {list.length === 0 ? (
-          <div className="px-5 py-10 sm:py-16 text-center">
-            <Users size={32} className="text-brand-ink-soft mx-auto mb-2" />
-            <p className="text-sm text-brand-ink-soft">
-              {q
-                ? `No customers match "${q}" in ${VIEWS[view].label}.`
-                : `No customers with ${VIEWS[view].label.toLowerCase()} orders.`}
-            </p>
-          </div>
+          <ListEmpty state={state} page={page} total={total} />
         ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-brand-cream text-xs font-mono uppercase tracking-widest text-brand-ink-soft">
-              <tr>
-                <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-left">Customer</th>
-                <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-left">Phone</th>
-                <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right">Orders</th>
-                <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right">
-                  {spentLabel}
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-brand-line">
-              {list.map((c) => (
-                <tr key={c.id} className="hover:bg-brand-cream transition-colors">
-                  <td className="px-3 sm:px-5 py-2.5 sm:py-3">
-                    <Link
-                      href={`/admin/customers/${c.id}`}
-                      className="block font-semibold whitespace-nowrap text-brand-ink hover:text-brand-red"
-                    >
-                      {c.name ?? "—"}
-                    </Link>
-                    {c.email && (
-                      <div className="text-xs text-brand-ink-soft whitespace-nowrap">
-                        {c.email}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 sm:px-5 py-2.5 sm:py-3 font-mono whitespace-nowrap text-brand-ink-soft">
-                    {c.phone}
-                  </td>
-                  <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right tabular-nums">
-                    {c.orderCount}
-                  </td>
-                  <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right font-semibold tabular-nums whitespace-nowrap">
-                    {formatINR(c.revenue)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <>
+            <CustomersTable rows={list} now={now} />
+            <CustomerRows rows={list} now={now} />
+            <Pagination
+              summary={`Showing ${start.toLocaleString("en-IN")}–${end.toLocaleString("en-IN")} of ${total.toLocaleString("en-IN")}`}
+              prevHref={hasPrev ? customersHref({ ...state, page: page - 1 }) : null}
+              nextHref={hasNext ? customersHref({ ...state, page: page + 1 }) : null}
+            />
+          </>
         )}
-      </div>
-
-      {/* Pagination — only render when there's more than one page. */}
-      {(hasPrev || hasNext) && (
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-brand-ink-soft tabular-nums">
-            Showing {start}–{end} of {total}
-          </p>
-          <div className="flex items-center gap-2">
-            {hasPrev ? (
-              <Link
-                href={buildHref({ page: page - 1 })}
-                className="inline-flex items-center gap-1 rounded-xl border border-brand-line bg-white px-3 py-2 text-sm font-semibold text-brand-ink hover:border-brand-ink transition-colors"
-              >
-                <ChevronLeft size={14} /> Prev
-              </Link>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded-xl border border-brand-line bg-white px-3 py-2 text-sm font-semibold text-brand-ink-soft opacity-50">
-                <ChevronLeft size={14} /> Prev
-              </span>
-            )}
-            {hasNext ? (
-              <Link
-                href={buildHref({ page: page + 1 })}
-                className="inline-flex items-center gap-1 rounded-xl border border-brand-line bg-white px-3 py-2 text-sm font-semibold text-brand-ink hover:border-brand-ink transition-colors"
-              >
-                Next <ChevronRight size={14} />
-              </Link>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded-xl border border-brand-line bg-white px-3 py-2 text-sm font-semibold text-brand-ink-soft opacity-50">
-                Next <ChevronRight size={14} />
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+      </Panel>
+    </>
   );
 }
 
-/** Status chip for the customer views — mirrors the Orders board chips. */
-function ViewChip({
-  href,
-  label,
-  sub,
-  count,
-  active,
-  danger,
-}: {
-  href: string;
-  label: string;
-  sub: string;
-  count: number;
-  active: boolean;
-  danger?: boolean;
-}) {
+// ── Views ───────────────────────────────────────────────────────────────────
+
+type CustomerRow = {
+  id: string;
+  name: string | null;
+  email: string | null;
+  phone: string;
+  createdAt: Date;
+  orderCount: number;
+  paidCount: number;
+  ltv: number;
+  lastOrderAt: Date | null;
+};
+
+// Compact cell padding keeps all nine columns inside a 1280px viewport with the
+// 240px sidebar; the first/last cells keep the panel's 16px inset.
+const CELL = "px-3 first:pl-4 last:pr-4";
+
+function CustomersTable({ rows, now }: { rows: CustomerRow[]; now: number }) {
   return (
-    <Link
-      href={href}
-      className={`shrink-0 inline-flex flex-col items-start gap-0.5 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full sm:rounded-2xl transition-colors sm:min-w-[140px] ${
-        active
-          ? danger
-            ? "bg-brand-red text-white"
-            : "bg-brand-ink text-white"
-          : "bg-white border border-brand-line text-brand-ink-soft hover:text-brand-ink"
-      }`}
-    >
-      <div className="flex items-center gap-1.5 w-full">
-        <span className="text-[13px] sm:text-sm font-semibold">{label}</span>
-        <span
-          className={`tabular-nums text-xs ${active ? "text-white/70" : "text-brand-ink-soft"}`}
-        >
-          {count}
-        </span>
-      </div>
-      {/* Explainer sub-line is desktop-only — mobile chips are slim pills */}
-      <span
-        className={`hidden sm:block text-[10px] font-mono uppercase tracking-widest truncate ${
-          active ? "text-white/60" : "text-brand-ink-soft"
-        }`}
-      >
-        {sub}
-      </span>
-    </Link>
+    <Table className="hidden md:block">
+      <THead>
+        <TH className={CELL}>Customer</TH>
+        <TH className={CELL}>Phone</TH>
+        <TH align="right" className={CELL}>
+          Orders
+        </TH>
+        <TH align="right" className={cn(CELL, "whitespace-normal")}>
+          Lifetime value
+        </TH>
+        <TH align="right" className={cn(CELL, "hidden whitespace-normal xl:table-cell")}>
+          Avg order
+        </TH>
+        <TH className={cn(CELL, "hidden whitespace-normal lg:table-cell")}>Last order</TH>
+        <TH className={cn(CELL, "hidden whitespace-normal xl:table-cell")}>Customer since</TH>
+        <TH className={CELL}>Segment</TH>
+        <TH className={cn(CELL, "w-12")}>
+          <span className="sr-only">Actions</span>
+        </TH>
+      </THead>
+      <TBody>
+        {rows.map((c) => (
+          <TR key={c.id}>
+            {/* 28% + max-w-0: flexible but capped (wide screens spread the rest); truncates. */}
+            <TD className={cn(CELL, "w-[28%] max-w-0")}>
+              <div className="flex min-w-0 items-center gap-3">
+                <Avatar name={c.name} />
+                <div className="min-w-0">
+                  <RowLink href={`/admin/customers/${c.id}`} className="block truncate">
+                    {c.name?.trim() || "Anonymous customer"}
+                  </RowLink>
+                  {c.email && <p className="truncate text-xs text-admin-muted">{c.email}</p>}
+                </div>
+              </div>
+            </TD>
+            <TD nowrap className={cn(CELL, "font-mono text-brand-ink-soft")}>
+              {formatPhone(c.phone)}
+            </TD>
+            <TD align="right" nowrap className={CELL}>
+              {c.orderCount.toLocaleString("en-IN")}
+            </TD>
+            <TD align="right" nowrap className={cn(CELL, "font-semibold", c.ltv === 0 && "font-normal text-admin-muted")}>
+              {formatINR(c.ltv)}
+            </TD>
+            <TD align="right" nowrap className={cn(CELL, "hidden text-brand-ink-soft xl:table-cell")}>
+              {c.paidCount > 0 ? formatINR(Math.round(c.ltv / c.paidCount)) : "—"}
+            </TD>
+            <TD nowrap className={cn(CELL, "hidden lg:table-cell")}>
+              {c.lastOrderAt ? formatRelative(c.lastOrderAt, now) : <span className="text-admin-muted">—</span>}
+            </TD>
+            <TD nowrap className={cn(CELL, "hidden text-brand-ink-soft xl:table-cell")}>
+              {formatMonthYear(c.createdAt)}
+            </TD>
+            <TD nowrap className={CELL}>
+              <SegmentBadge segment={customerSegmentOf(c.orderCount, c.lastOrderAt, now)} />
+            </TD>
+            <TD interactive className={cn(CELL, "py-0 text-right")}>
+              <CustomerRowActions id={c.id} name={c.name} phone={c.phone} email={c.email} />
+            </TD>
+          </TR>
+        ))}
+      </TBody>
+    </Table>
   );
+}
+
+/** Phones: one panel of divided rows; the whole row opens the profile. */
+function CustomerRows({ rows, now }: { rows: CustomerRow[]; now: number }) {
+  return (
+    <ul className="divide-y divide-admin-line md:hidden">
+      {rows.map((c) => (
+        <li key={c.id}>
+          <Link
+            href={`/admin/customers/${c.id}`}
+            className="flex items-center gap-3 px-4 py-3 transition-colors active:bg-admin-subtle"
+          >
+            <Avatar name={c.name} className="h-9 w-9" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-3">
+                <p className="min-w-0 flex-1 truncate text-sm font-semibold text-brand-ink">
+                  {c.name?.trim() || "Anonymous customer"}
+                </p>
+                <p
+                  className={cn(
+                    "shrink-0 whitespace-nowrap text-sm font-semibold tabular-nums text-brand-ink",
+                    c.ltv === 0 && "font-normal text-admin-muted",
+                  )}
+                >
+                  {formatINR(c.ltv)}
+                </p>
+              </div>
+              <p className="mt-0.5 whitespace-nowrap font-mono text-xs text-admin-muted">{formatPhone(c.phone)}</p>
+              <div className="mt-1 flex items-center gap-2">
+                <p className="min-w-0 flex-1 truncate text-xs text-admin-muted">
+                  {plural(c.orderCount, "order")} ·{" "}
+                  {c.lastOrderAt
+                    ? formatRelative(c.lastOrderAt, now)
+                    : `Joined ${formatMonthYear(c.createdAt)}`}
+                </p>
+                <span className="shrink-0">
+                  <SegmentBadge segment={customerSegmentOf(c.orderCount, c.lastOrderAt, now)} />
+                </span>
+              </div>
+            </div>
+            <ChevronRight size={16} aria-hidden className="shrink-0 text-admin-muted" />
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ListEmpty({ state, page, total }: { state: ListState; page: number; total: number }) {
+  if (total > 0 && page > 1) {
+    return (
+      <EmptyState
+        icon={Users}
+        title="No more customers"
+        description={`This list has ${plural(total, "customer")}; page ${page.toLocaleString("en-IN")} is past the end.`}
+        action={
+          <ButtonLink href={customersHref({ ...state, page: 1 })} size="sm">
+            Back to first page
+          </ButtonLink>
+        }
+      />
+    );
+  }
+  if (state.q) {
+    return (
+      <EmptyState
+        icon={SearchX}
+        title={`No customers match “${state.q}”`}
+        description={
+          state.segment === "all"
+            ? "Check the spelling, or search by phone number or email instead."
+            : `Nothing in ${SEGMENT_LABEL[state.segment]} matches. Try All customers or a different search.`
+        }
+        action={
+          <ButtonLink href={customersHref({ ...state, q: "" })} size="sm">
+            Clear search
+          </ButtonLink>
+        }
+      />
+    );
+  }
+  if (state.segment !== "all") {
+    return (
+      <EmptyState
+        icon={Users}
+        title={`No customers in ${SEGMENT_LABEL[state.segment]}`}
+        description="Nobody fits this segment right now."
+        action={
+          <ButtonLink href={customersHref({ ...state, segment: "all" })} size="sm">
+            View all customers
+          </ButtonLink>
+        }
+      />
+    );
+  }
+  return (
+    <EmptyState
+      icon={Users}
+      title="No customers yet"
+      description="Customers appear here after their first checkout."
+    />
+  );
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** List URL with defaults omitted (segment=all, sort=ltv, page=1). */
+function customersHref(s: ListState & { page?: number }): string {
+  const params = new URLSearchParams();
+  if (s.q) params.set("q", s.q);
+  if (s.segment !== "all") params.set("segment", s.segment);
+  if (s.sort !== "ltv") params.set("sort", s.sort);
+  if (s.view !== "all") params.set("view", s.view);
+  if (s.page && s.page > 1) params.set("page", String(s.page));
+  const qs = params.toString();
+  return qs ? `/admin/customers?${qs}` : "/admin/customers";
+}
+
+function first(v: string | string[] | undefined): string {
+  return (Array.isArray(v) ? v[0] : v) ?? "";
+}
+
+function pick<T extends string>(allowed: readonly T[], raw: string, fallback: T): T {
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
 }

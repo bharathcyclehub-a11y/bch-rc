@@ -13,6 +13,7 @@ import { db } from "@/db";
 import { orders, customers, events, notificationsOutbox, coupons } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
 import { formatINR, formatIST } from "@/lib/utils";
+import { OrderStatusBadge } from "@/components/admin/Badge";
 import { OFFERS, bundleDiscountInr, bundleTierLabel } from "@/lib/config";
 import { orderConfirmationWaLink } from "@/lib/wa";
 import { ShipButton } from "./ShipButton";
@@ -130,7 +131,7 @@ export default async function AdminOrderDetail({
             <h1 className="font-display text-lg sm:text-2xl font-bold text-brand-ink font-mono break-all">
               {order.id}
             </h1>
-            <StatusBadge status={order.status} />
+            <OrderStatusBadge status={order.status} />
             <span className="bg-brand-cream text-brand-ink-soft text-[10px] font-mono uppercase tracking-widest font-semibold px-2 py-1 rounded-full border border-brand-line">
               {order.paymentMethod} · {order.paymentStatus}
             </span>
@@ -558,26 +559,5 @@ function Field({
       <dt className="text-brand-ink-soft shrink-0">{label}</dt>
       <dd className={`text-brand-ink text-right truncate ${mono ? "font-mono text-xs" : ""}`}>{value ?? "—"}</dd>
     </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    PENDING: "bg-gold/10 text-gold",
-    PENDING_COD_VERIFICATION: "bg-gold/10 text-gold",
-    PAID: "bg-success/10 text-success",
-    PACKED: "bg-success/10 text-success",
-    SHIPPED: "bg-blue-100 text-blue-700",
-    DELIVERED: "bg-success/15 text-success",
-    CANCELLED: "bg-brand-red/10 text-brand-red",
-    REFUNDED: "bg-brand-red/10 text-brand-red",
-    FAILED: "bg-brand-red/10 text-brand-red",
-    ABANDONED: "bg-brand-ink-soft/10 text-brand-ink-soft",
-    RETURNED: "bg-brand-red/10 text-brand-red",
-  };
-  return (
-    <span className={`${styles[status] ?? "bg-brand-line text-brand-ink"} text-[10px] font-mono uppercase tracking-widest font-semibold px-2.5 py-1 rounded-full`}>
-      {status}
-    </span>
   );
 }

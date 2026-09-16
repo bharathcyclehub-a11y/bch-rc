@@ -20,6 +20,32 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Local development database
+
+The storefront and admin need Postgres. To work locally without touching
+production, use the bundled local database (PGlite — real Postgres, nothing to
+install):
+
+```bash
+npm run dev:db          # terminal 1 — local Postgres on 127.0.0.1:54329 (data in .devdb/)
+npm run dev:db:setup    # applies every migration + loads sample data (re-run to reset)
+npm run dev             # terminal 2
+```
+
+`.env.local` for this mode:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54329/postgres
+DATABASE_POOL_MAX=1                 # PGlite is a single session
+ADMIN_DEV_EMAIL=dev@pocketrc.local  # local-only admin sign-in
+```
+
+`ADMIN_DEV_EMAIL` only works under `next dev` while Supabase is **not**
+configured, and the email must exist in the connected `admins` table (the setup
+script creates it). The setup script refuses to run against a non-localhost
+database. For real data, set the Supabase `DATABASE_URL_POOLED` and keys instead
+and remove `ADMIN_DEV_EMAIL` and `DATABASE_POOL_MAX`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

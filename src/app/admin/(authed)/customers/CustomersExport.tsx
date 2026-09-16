@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Download, Loader2 } from "lucide-react";
+import { Download } from "lucide-react";
+import { Button } from "@/components/admin/Button";
+import { useToast } from "@/components/admin/Toast";
 
 /**
  * Customer CRM export. Downloads a site-scoped CSV from /api/admin/export
@@ -10,6 +12,7 @@ import { Download, Loader2 } from "lucide-react";
  */
 export function CustomersExport() {
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
 
   async function download() {
     setBusy(true);
@@ -17,7 +20,7 @@ export function CustomersExport() {
       const res = await fetch(`/api/admin/export?dataset=customers`);
       if (!res.ok) {
         const msg = await res.text().catch(() => "");
-        alert(`Export failed (${res.status}). ${msg}`);
+        toast({ title: `Export failed (${res.status})`, description: msg || undefined, tone: "error" });
         return;
       }
       const blob = await res.blob();
@@ -34,27 +37,22 @@ export function CustomersExport() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+      toast({ title: "Customers CSV downloaded", description: filename, tone: "success" });
     } catch {
-      alert("Could not download customers CSV. Check your connection and retry.");
+      toast({
+        title: "Couldn't download customers CSV",
+        description: "Check your connection and retry.",
+        tone: "error",
+      });
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <button
-      type="button"
-      onClick={download}
-      disabled={busy}
-      className="shrink-0 inline-flex items-center gap-2 rounded-xl bg-white border border-brand-line text-brand-ink text-xs sm:text-sm font-semibold px-3 py-2.5 sm:px-4 sm:py-2.5 hover:border-brand-ink transition-colors disabled:opacity-50"
-    >
-      {busy ? (
-        <Loader2 size={14} className="animate-spin" />
-      ) : (
-        <Download size={14} />
-      )}
-      <span className="hidden sm:inline">Export CSV</span>
+    <Button onClick={download} loading={busy} icon={<Download size={15} aria-hidden />}>
+      <span className="max-sm:hidden">Export CSV</span>
       <span className="sm:hidden">CSV</span>
-    </button>
+    </Button>
   );
 }
