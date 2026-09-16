@@ -75,8 +75,44 @@ export const FUNNEL_STAGES: FunnelStage[] = [
   { key: "cart", label: "Added to cart", events: ["add_to_cart"] },
   { key: "checkout", label: "Started checkout", events: ["checkout_started"] },
   { key: "order", label: "Placed order", events: ["order_submitted"] },
-  { key: "paid", label: "Paid", events: ["payment_succeeded", "purchase"] },
+  { key: "paid", label: "Sale buyers", events: ["payment_succeeded", "purchase"] },
 ];
 
 /** Max events accepted in a single ingest batch (abuse guard). */
 export const MAX_FUNNEL_BATCH = 30;
+/** Keep each beacon under the browser's shared keepalive request quota. */
+export const MAX_FUNNEL_BODY_BYTES = 48 * 1024;
+
+/** Client event/session IDs must use the same UUID format as the database. */
+export function isTrackingUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** Only event dimensions used by the storefront may enter the event ledger. */
+const METADATA_KEYS = new Set([
+  "skuId", "sku", "qty", "quantity", "valueInr", "cartValueInr", "itemCount",
+  "subtotalInr", "totalInr", "amountInr", "discountInr", "pincode", "serviceable",
+  "codAvailable", "paymentMethod", "method", "reason", "failureReason", "variant",
+  "placement", "via", "code", "bucket", "trigger", "outcome", "attempt", "guessInr",
+]);
+
+export function cleanFunnelMetadata(value: unknown): Record<string, string | number | boolean | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, string | number | boolean | null> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!METADATA_KEYS.has(key)) continue;
+    if (typeof item === "string") {
+      // Payment providers sometimes include customer contact details in errors.
+      result[key] = item.slice(0, 200).replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[redacted]").replace(/\b\d{10,15}\b/g, "[redacted]");
+    } else if (item === null || typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item))) {
+      result[key] = item;
+    }
+  }
+  return result;
+}
+
+/** Query strings can contain contact information and order access tokens. */
+export function cleanTrackingPath(value: unknown): string | null {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) return null;
+  return value.split(/[?#]/, 1)[0].slice(0, 512);
+}

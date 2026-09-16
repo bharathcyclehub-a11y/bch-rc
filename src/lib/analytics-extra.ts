@@ -36,6 +36,10 @@ async function rows(q: ReturnType<typeof sql>): Promise<Record<string, unknown>[
 
 const paidList = sql.join(PAID_STATUSES.map((s) => sql`${s}`), sql`, `);
 
+function upper(column: "placed_at" | "created_at", to?: Date) {
+  return to ? sql` AND ${sql.raw(column)} < ${to.toISOString()}` : sql``;
+}
+
 // ── Coupon performance ───────────────────────────────────────────────────────
 // Every field is derived from the orders ledger, so it reconciles with Revenue.
 
@@ -57,6 +61,7 @@ export type CouponPerformance = {
 export async function getCouponPerformance(
   siteIds: string[],
   windowStart: Date,
+  windowEnd?: Date,
 ): Promise<CouponPerformance> {
   if (siteIds.length === 0) return { rows: [], totals: { applied: 0, redeemed: 0, revenue: 0, discount: 0 } };
 
@@ -65,15 +70,14 @@ export async function getCouponPerformance(
       coupon_code AS code,
       count(*)::int AS applied,
       count(*) FILTER (WHERE status IN (${paidList}))::int AS redeemed,
-      coalesce(sum(total_inr)    FILTER (WHERE status IN (${paidList})), 0)::int AS revenue,
-      coalesce(sum(discount_inr) FILTER (WHERE status IN (${paidList})), 0)::int AS discount
+      coalesce(sum(total_inr)    FILTER (WHERE status IN (${paidList})), 0)::bigint AS revenue,
+      coalesce(sum(discount_inr) FILTER (WHERE status IN (${paidList})), 0)::bigint AS discount
     FROM orders
     WHERE site_id = ANY(${siteArray(siteIds)})
-      AND placed_at >= ${windowStart.toISOString()}
+      AND placed_at >= ${windowStart.toISOString()}${upper("placed_at", windowEnd)}
       AND coupon_code IS NOT NULL AND coupon_code <> ''
     GROUP BY coupon_code
     ORDER BY revenue DESC, applied DESC
-    LIMIT 50
   `);
 
   const list: CouponRow[] = r.map((row) => {
@@ -121,6 +125,7 @@ export type EngagementCounts = Record<string, { events: number; visitors: number
 export async function getEngagementEvents(
   siteIds: string[],
   windowStart: Date,
+  windowEnd?: Date,
 ): Promise<EngagementCounts> {
   if (siteIds.length === 0) return {};
   const typeList = sql.join(ENGAGEMENT_TYPES.map((t) => sql`${t}`), sql`, `);
@@ -131,7 +136,7 @@ export async function getEngagementEvents(
     FROM funnel_events
     WHERE site_id = ANY(${siteArray(siteIds)})
       AND is_bot = false
-      AND created_at >= ${windowStart.toISOString()}
+      AND created_at >= ${windowStart.toISOString()}${upper("created_at", windowEnd)}
       AND type IN (${typeList})
     GROUP BY type
   `);
@@ -160,6 +165,7 @@ export type CheckoutAnalytics = {
 export async function getCheckoutAnalytics(
   siteIds: string[],
   windowStart: Date,
+  windowEnd?: Date,
 ): Promise<CheckoutAnalytics> {
   const empty: CheckoutAnalytics = {
     stages: {
@@ -183,19 +189,19 @@ export async function getCheckoutAnalytics(
         count(*) FILTER (WHERE type = 'payment_failed')::int AS payment_failed,
         count(*) FILTER (WHERE type = 'payment_cancelled')::int AS payment_cancelled
       FROM funnel_events
-      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}
+      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}${upper("created_at", windowEnd)}
     `),
     rows(sql`
       SELECT coalesce(nullif(metadata->>'method',''), 'unknown') AS method, count(*)::int AS n
       FROM funnel_events
-      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}
+      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}${upper("created_at", windowEnd)}
         AND type = 'payment_method_selected'
       GROUP BY 1 ORDER BY n DESC
     `),
     rows(sql`
       SELECT coalesce(nullif(metadata->>'reason',''), '(no reason given)') AS reason, count(*)::int AS n
       FROM funnel_events
-      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}
+      WHERE site_id = ANY(${sites}) AND is_bot = false AND created_at >= ${from}${upper("created_at", windowEnd)}
         AND type = 'payment_failed'
       GROUP BY 1 ORDER BY n DESC LIMIT 8
     `),
@@ -230,6 +236,7 @@ export type ProductFunnelRow = {
 export async function getProductFunnel(
   siteIds: string[],
   windowStart: Date,
+  windowEnd?: Date,
 ): Promise<ProductFunnelRow[]> {
   if (siteIds.length === 0) return [];
   const r = await rows(sql`
@@ -241,7 +248,7 @@ export async function getProductFunnel(
     FROM funnel_events
     WHERE site_id = ANY(${siteArray(siteIds)})
       AND is_bot = false
-      AND created_at >= ${windowStart.toISOString()}
+      AND created_at >= ${windowStart.toISOString()}${upper("created_at", windowEnd)}
       AND type IN ('product_view', 'add_to_cart')
       AND metadata->>'skuId' IS NOT NULL AND metadata->>'skuId' <> ''
     GROUP BY 1

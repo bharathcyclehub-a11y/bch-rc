@@ -21,6 +21,7 @@
 
 declare global {
   interface Window {
+    clarity?: (command: string, ...args: unknown[]) => void;
     gtag?: (
       command: string,
       eventName: string,
@@ -63,7 +64,11 @@ const CONSENT_KEY = "prc_consent";
 
 export function consentGranted(): boolean {
   if (typeof window === "undefined") return false;
-  return window.localStorage?.getItem(CONSENT_KEY) === "accepted";
+  try {
+    return window.localStorage?.getItem(CONSENT_KEY) === "accepted";
+  } catch {
+    return false;
+  }
 }
 
 /** UUID — Web Crypto if available, RFC 4122-style fallback otherwise. */
@@ -92,7 +97,7 @@ async function postToCapi(input: {
     await fetch("/api/track/meta", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify({ ...input, consent: "accepted" }),
       keepalive: true,
     });
   } catch {
@@ -100,12 +105,12 @@ async function postToCapi(input: {
   }
 }
 
-export function trackPageView(path?: string): void {
+export function trackPageView(path?: string, channels: { ga?: boolean; meta?: boolean } = { ga: true, meta: true }): void {
   if (typeof window === "undefined") return;
   // GA fires for everyone — Consent Mode keeps it cookieless until consent.
-  window.gtag?.("event", "page_view", { page_path: path ?? window.location.pathname });
+  if (channels.ga) window.gtag?.("event", "page_view", { page_path: path ?? window.location.pathname });
   // Pixel + CAPI share identifying data → opt-in only.
-  if (!consentGranted()) return;
+  if (!channels.meta || !consentGranted()) return;
   const eventId = newEventId();
   window.fbq?.("track", "PageView", undefined, { eventID: eventId });
   void postToCapi({
@@ -180,12 +185,12 @@ export function trackInitiateCheckout(subtotalInr: number): void {
   });
 }
 
-export function trackPurchase(input: PurchaseEventInput): void {
+export function trackPurchase(input: PurchaseEventInput, channels: { ga?: boolean; meta?: boolean } = { ga: true, meta: true }): void {
   if (typeof window === "undefined") return;
   // GA purchase fires for everyone (cookieless-modeled until consent) so
   // revenue + conversion data is never lost. Meta Pixel/CAPI — which also
   // carries hashed email/phone — stays opt-in.
-  window.gtag?.("event", "purchase", {
+  if (channels.ga) window.gtag?.("event", "purchase", {
     transaction_id: input.orderId,
     currency: "INR",
     value: input.totalInr,
@@ -197,8 +202,8 @@ export function trackPurchase(input: PurchaseEventInput): void {
       quantity: c.quantity,
     })),
   });
-  if (!consentGranted()) return;
-  const eventId = newEventId();
+  if (!channels.meta || !consentGranted()) return;
+  const eventId = `purchase:${input.orderId}`;
   window.fbq?.(
     "track",
     "Purchase",

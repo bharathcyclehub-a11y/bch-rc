@@ -13,7 +13,7 @@
  *    (the dashboard stops saying "No data received") without dropping a
  *    tracking cookie on a non-consenting user. When the visitor taps "Allow
  *    analytics" we upgrade consent to "granted" and the same session becomes
- *    fully measured. This is Google's prescribed DPDP/GDPR-safe pattern.
+ *    fully measured. This is an advanced Consent Mode configuration; it is not proof of compliance.
  *
  *  - Meta Pixel (fbq) still loads ONLY after explicit consent, because Meta
  *    has no equivalent cookieless mode and the Pixel + our CAPI relay share
@@ -25,10 +25,11 @@
  * dataLayer — order matters for Consent Mode.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import Script from "next/script";
-import { trackPageView } from "@/lib/analytics-client";
+import { consentGranted, trackPageView } from "@/lib/analytics-client";
+import { shouldTrackPath } from "@/lib/analytics";
 import { trackFunnel } from "@/lib/funnel-client";
 
 const CONSENT_KEY = "prc_consent";
@@ -40,67 +41,68 @@ export default function Analytics() {
   // which is the "not a valid selector" crash. Strip all whitespace, and for GA
   // require a clean measurement-ID shape; anything unexpected is treated as
   // unset so a bad value can never take down the page.
-  const strip = (v: string | undefined) => v?.replace(/\s+/g, "") || undefined;
+  const strip = (v: string | undefined) => v?.replace(/[\s\u200B-\u200D\u2060\uFEFF]+/g, "") || undefined;
   const rawGa = strip(process.env.NEXT_PUBLIC_GA_ID);
-  const gaId = rawGa && /^[\w-]+$/.test(rawGa) ? rawGa : undefined;
-  const pixelId = strip(process.env.NEXT_PUBLIC_META_PIXEL_ID);
-  const clarityId = strip(process.env.NEXT_PUBLIC_CLARITY_ID);
+  const gaId = rawGa && /^G-[A-Z0-9]+$/.test(rawGa) ? rawGa : undefined;
+  const rawPixel = strip(process.env.NEXT_PUBLIC_META_PIXEL_ID);
+  const pixelId = rawPixel && /^\d+$/.test(rawPixel) ? rawPixel : undefined;
+  const rawClarity = strip(process.env.NEXT_PUBLIC_CLARITY_ID);
+  const clarityId = rawClarity && /^[a-z0-9]+$/i.test(rawClarity) ? rawClarity : undefined;
   const pathname = usePathname();
   const sp = useSearchParams();
 
-  // `granted` only gates the Meta Pixel (and the fbq/CAPI calls inside
-  // analytics-client). GA itself always loads — Consent Mode handles its
-  // cookie posture.
+  const trackable = shouldTrackPath(pathname ?? "");
+  const routeKey = `${pathname ?? "/"}?${sp?.toString() ?? ""}`;
   const [granted, setGranted] = useState(false);
+  const [gaReady, setGaReady] = useState(false);
+  const [pixelReady, setPixelReady] = useState(false);
+  const gaPage = useRef<string | null>(null);
+  const metaPage = useRef<string | null>(null);
+  const funnelPage = useRef<string | null>(null);
 
-  // Read consent on mount + listen for the banner's accept event. On accept
-  // we (a) flip `granted` so the Pixel mounts, and (b) push a Consent Mode
-  // "update" so gtag upgrades the current session from cookieless to full.
   useEffect(() => {
-    const grant = () => {
+    const apply = (accepted: boolean) => {
+      setGranted(accepted);
+      const state = accepted ? "granted" : "denied";
       window.gtag?.("consent", "update", {
-        ad_storage: "granted",
-        analytics_storage: "granted",
-        ad_user_data: "granted",
-        ad_personalization: "granted",
+        ad_storage: state, analytics_storage: state,
+        ad_user_data: state, ad_personalization: state,
       });
-      // fbq's typed signature only covers init/track; consent is a valid
-      // runtime command, so call through an untyped reference.
-      (window.fbq as ((...args: unknown[]) => void) | undefined)?.(
-        "consent",
-        "grant",
-      );
+      (window.fbq as ((...args: unknown[]) => void) | undefined)?.("consent", accepted ? "grant" : "revoke");
+      window.clarity?.("consentv2", { ad_Storage: state, analytics_Storage: state });
     };
-    const stored = window.localStorage?.getItem(CONSENT_KEY);
-    if (stored === "accepted") setGranted(true);
-    const onConsent = (e: Event) => {
-      const detail = (e as CustomEvent<string>).detail;
-      if (detail === "accepted") {
-        setGranted(true);
-        grant();
-      }
+    apply(consentGranted());
+    const onConsent = (e: Event) => apply((e as CustomEvent<string>).detail === "accepted");
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CONSENT_KEY) apply(e.newValue === "accepted");
     };
-    window.addEventListener("prc:consent", onConsent as EventListener);
-    return () => window.removeEventListener("prc:consent", onConsent as EventListener);
+    window.addEventListener("prc:consent", onConsent);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("prc:consent", onConsent);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
-  // Fire page_view on client-side route changes. gtag's config already sends
-  // the first page_view (cookieless or full per consent); this covers SPA
-  // navigations. trackPageView fires gtag for everyone and Pixel/CAPI only
-  // when consented, so no `granted` guard here.
+  // Each integration has one page-view owner. Readiness callbacks cover slow
+  // script loads without racing a fixed timer or firing another initial hit.
   useEffect(() => {
-    // Skip the very first run — script init covers it.
-    const t = setTimeout(() => trackPageView(pathname ?? "/"), 50);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, sp?.toString()]);
+    if (!trackable) {
+      gaPage.current = metaPage.current = funnelPage.current = null;
+      return;
+    }
+    const ga = gaReady && gaPage.current !== routeKey;
+    const meta = granted && pixelReady && metaPage.current !== routeKey;
+    if (ga || meta) trackPageView(pathname ?? "/", { ga, meta });
+    if (ga) gaPage.current = routeKey;
+    if (meta) metaPage.current = routeKey;
+    if (funnelPage.current !== routeKey) {
+      trackFunnel("page_view", {}, { path: pathname ?? "/" });
+      funnelPage.current = routeKey;
+    }
+  }, [trackable, routeKey, pathname, gaReady, pixelReady, granted]);
 
-  // First-party funnel page_view — fires for EVERY visitor (no consent gate),
-  // including the initial load. This is the funnel's top-of-line denominator.
-  useEffect(() => {
-    trackFunnel("page_view", {}, { path: pathname ?? "/" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  if (!trackable) return null;
 
   return (
     <>
@@ -114,7 +116,7 @@ export default function Analytics() {
             src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`}
             strategy="afterInteractive"
           />
-          <Script id="gtag-init" strategy="afterInteractive">
+          <Script id="gtag-init" strategy="afterInteractive" onReady={() => { setGaReady(true); window.dispatchEvent(new Event("prc:analytics-ready")); }}>
             {`
               window.dataLayer = window.dataLayer || [];
               function gtag(){dataLayer.push(arguments);}
@@ -132,7 +134,7 @@ export default function Analytics() {
               });
               gtag('js', new Date());
               gtag('config', '${gaId}', {
-                send_page_view: true,
+                send_page_view: false,
                 anonymize_ip: true,
                 cookie_flags: 'SameSite=Lax;Secure'
               });
@@ -141,11 +143,10 @@ export default function Analytics() {
         </>
       )}
 
-      {/* Meta Pixel — opt-in only (loads after consent). Auto-fires PageView
-          on init; subsequent events come from analytics-client (Pixel+CAPI,
+      {/* Meta Pixel — opt-in only (loads after consent). PageView is emitted after readiness; subsequent events come from analytics-client (Pixel+CAPI,
           both consent-gated). */}
       {granted && pixelId && (
-        <Script id="fbq-init" strategy="afterInteractive">
+        <Script id="fbq-init" strategy="afterInteractive" onReady={() => { setPixelReady(true); window.dispatchEvent(new Event("prc:analytics-ready")); }}>
           {`
             !function(f,b,e,v,n,t,s)
             {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
@@ -156,7 +157,7 @@ export default function Analytics() {
             s.parentNode.insertBefore(t,s)}(window, document,'script',
             'https://connect.facebook.net/en_US/fbevents.js');
             fbq('init', '${pixelId}');
-            fbq('track', 'PageView');
+
           `}
         </Script>
       )}
@@ -174,6 +175,7 @@ export default function Analytics() {
               t.src="https://www.clarity.ms/tag/"+i;
               y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
             })(window, document, "clarity", "script", "${clarityId}");
+            window.clarity("consentv2", { ad_Storage: "granted", analytics_Storage: "granted" });
           `}
         </Script>
       )}

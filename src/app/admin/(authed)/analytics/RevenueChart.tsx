@@ -25,7 +25,7 @@ type Metric = "revenue" | "orders" | "customers";
 const METRICS: { key: Metric; label: string }[] = [
   { key: "revenue", label: "Revenue" },
   { key: "orders", label: "Orders" },
-  { key: "customers", label: "Customers" },
+  { key: "customers", label: "New profiles" },
 ];
 
 const W = 800;
@@ -73,7 +73,7 @@ export default function RevenueChart({ points }: { points: ChartPoint[] }) {
         <div className="px-5 py-10 sm:py-16 text-center">
           <div className="text-3xl font-bold tabular-nums text-brand-ink">{fmt(total)}</div>
           <p className="mt-1 text-sm text-brand-ink-soft">
-            Single-day view — pick 7 days or more to see a trend.
+            {points[0]?.label ?? "No dates selected"}. Select more dates or a smaller chart grouping to see a trend.
           </p>
         </div>
       </div>
@@ -97,6 +97,17 @@ export default function RevenueChart({ points }: { points: ChartPoint[] }) {
 
       <div
         className="relative px-2 pb-2 pt-4"
+        tabIndex={0}
+        role="group"
+        aria-label="Sales chart. Use the left and right arrow keys to inspect each period."
+        onFocus={() => setHover(0)}
+        onBlur={() => setHover(null)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            event.preventDefault();
+            setHover((index) => Math.max(0, Math.min(n - 1, (index ?? 0) + (event.key === "ArrowRight" ? 1 : -1))));
+          }
+        }}
         onMouseLeave={() => setHover(null)}
         onMouseMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
@@ -177,7 +188,7 @@ export default function RevenueChart({ points }: { points: ChartPoint[] }) {
           <div
             className="pointer-events-none absolute -translate-x-1/2 rounded-lg border border-brand-line bg-white px-2.5 py-1.5 shadow-lg"
             style={{
-              left: `${(hover / Math.max(1, n - 1)) * 100}%`,
+              left: `${Math.max(12, Math.min(88, (hover / Math.max(1, n - 1)) * 100))}%`,
               top: 4,
             }}
           >
@@ -215,7 +226,7 @@ function Header({
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-brand-line px-4 sm:px-5 py-3.5">
       <div>
-        <h2 className="font-semibold text-brand-ink">Revenue over time</h2>
+        <h2 className="font-semibold text-brand-ink">Sales over time</h2>
         <p className="text-xs text-brand-ink-soft tabular-nums mt-0.5">
           {fmt(total)} total
         </p>

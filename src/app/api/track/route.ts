@@ -34,6 +34,8 @@ import {
   type TrafficSource,
 } from "@/lib/analytics";
 import { logError } from "@/lib/logger";
+import { rateLimit } from "@/lib/rate-limit";
+import { cleanTrackingPath, isTrackingUuid } from "@/lib/funnel-events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -92,20 +94,32 @@ export async function POST(req: NextRequest) {
   if (secret && req.headers.get("x-track-secret") !== secret) {
     return new NextResponse(null, { status: 204 });
   }
+  if (!secret) {
+    const limited = rateLimit(req, { scope: "track:session", limit: 120, silent: true });
+    if (limited) return limited;
+  }
 
   let body: TrackBody;
   try {
-    body = (await req.json()) as TrackBody;
+    const raw = await req.text();
+    if (raw.length > 16_384) return new NextResponse(null, { status: 204 });
+    body = JSON.parse(raw) as TrackBody;
   } catch {
     return new NextResponse(null, { status: 204 });
   }
 
+  if (!body || typeof body !== "object") return new NextResponse(null, { status: 204 });
   const { sid, vid } = body;
-  if (!sid || !vid) return new NextResponse(null, { status: 204 });
+  if (!isTrackingUuid(sid) || !isTrackingUuid(vid)) return new NextResponse(null, { status: 204 });
+  for (const [key, value] of Object.entries(body)) {
+    if (value !== null && value !== undefined && (typeof value !== "string" || value.length > 2048)) return new NextResponse(null, { status: 204 });
+    if (key === "path" && !cleanTrackingPath(value)) return new NextResponse(null, { status: 204 });
+  }
 
   try {
     const ua = body.ua ?? req.headers.get("user-agent");
     const bot = isBotUA(ua);
+    if (bot) return new NextResponse(null, { status: 204 });
     const siteId = await resolveSiteId(body.host);
     const refHost = referrerHostOf(body.referrer);
     const source: TrafficSource = classifySource({

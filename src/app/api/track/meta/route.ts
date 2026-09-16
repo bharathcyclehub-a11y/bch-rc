@@ -23,6 +23,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createHash } from "node:crypto";
 import { logError } from "@/lib/logger";
 import { rateLimit } from "@/lib/rate-limit";
+import { isBotUA } from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,6 +48,7 @@ type CapiEvent = {
 };
 
 type Body = {
+  consent?: string;
   eventName: string;
   eventId: string;
   eventTime: number;
@@ -70,6 +72,10 @@ function normalisePhone(raw: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  if ((origin && origin !== req.nextUrl.origin) || req.headers.get("sec-fetch-site") === "cross-site" || isBotUA(req.headers.get("user-agent"))) {
+    return new NextResponse(null, { status: 204 });
+  }
   // Cap per-IP so the configured CAPI relay can't be driven to flood Meta with
   // fabricated conversions. Silent 204 keeps the best-effort telemetry contract.
   const limited = rateLimit(req, { scope: "track:meta", limit: 120, silent: true });
@@ -87,7 +93,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return new NextResponse(null, { status: 204 });
   }
-  if (!body.eventName || !body.eventId) {
+  if (!body || body.consent !== "accepted" || !["PageView", "AddToCart", "InitiateCheckout", "Purchase"].includes(body.eventName) || typeof body.eventId !== "string" || body.eventId.length > 128) {
     return new NextResponse(null, { status: 204 });
   }
 

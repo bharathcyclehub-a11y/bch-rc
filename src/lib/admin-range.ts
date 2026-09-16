@@ -18,7 +18,7 @@
  * <RangeTabs> control and any future export route all agree by construction.
  */
 
-import { addUtcDays, istDayStart, istShortDate, istYmd, IST_OFFSET_MS } from "@/lib/tz";
+import { addUtcDays, istDayStart, istDayStartFromYmd, istShortDate, istYmd } from "@/lib/tz";
 
 /** Preset windows offered by the shared control, in days INCLUSIVE of today. */
 export const RANGE_PRESETS = [1, 7, 14, 30, 90] as const;
@@ -27,8 +27,6 @@ export type RangePreset = (typeof RANGE_PRESETS)[number];
 /** Hard ceiling on a custom span. Guards against a hand-typed ?from=1970-01-01
  *  turning an indexed range scan into a full table scan. */
 const MAX_CUSTOM_DAYS = 366;
-
-const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export type AdminRange = {
   mode: "preset" | "custom";
@@ -47,17 +45,6 @@ export type AdminRange = {
   /** Querystring fragment that reproduces this range ("" when it's the default). */
   query: string;
 };
-
-/** The UTC instant of IST midnight on a `YYYY-MM-DD` IST calendar date. */
-function istDayStartFromYmd(ymd: string): Date | null {
-  if (!YMD_RE.test(ymd)) return null;
-  const [y, m, d] = ymd.split("-").map(Number);
-  // Round-trip through istYmd to reject impossible dates (2026-02-31 etc.),
-  // which Date.UTC would silently roll forward into March.
-  const instant = new Date(Date.UTC(y, m - 1, d) - IST_OFFSET_MS);
-  if (Number.isNaN(instant.getTime()) || istYmd(instant) !== ymd) return null;
-  return instant;
-}
 
 function presetRange(days: number, defaultDays: number): AdminRange {
   const from = addUtcDays(istDayStart(), -(days - 1));

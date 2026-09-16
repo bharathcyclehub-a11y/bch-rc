@@ -83,8 +83,8 @@ export default async function OrderSuccessPage({
   // verified) so failed/abandoned orders don't pollute the conversion
   // signal Meta uses to bid on ads.
   const settled =
-    (order.paymentStatus === "CAPTURED" && order.status !== "FAILED") ||
-    (order.paymentMethod === "COD" && order.status !== "PENDING_COD_VERIFICATION");
+    ["PAID", "PACKED", "SHIPPED", "DELIVERED"].includes(order.status) &&
+    (order.paymentStatus === "CAPTURED" || order.paymentMethod === "COD");
   const contactEmail =
     (order.shippingAddress as { email?: string | null } | null)?.email ?? null;
   const contactPhone =

@@ -12,25 +12,18 @@
  */
 
 import type { NextRequest } from "next/server";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { db } from "@/db";
 import { funnelEvents, analyticsSessions } from "@/db/schema";
-import { SESSION_COOKIE, VISITOR_COOKIE, isBotUA } from "@/lib/analytics";
-import { isFunnelEvent, type FunnelEventType } from "@/lib/funnel-events";
+import { SESSION_COOKIE, VISITOR_COOKIE, isBotUA, shouldTrackPath } from "@/lib/analytics";
+import { cleanFunnelMetadata, cleanTrackingPath, isFunnelEvent, isTrackingUuid, MAX_FUNNEL_BATCH, type FunnelEventType } from "@/lib/funnel-events";
 import { logError } from "@/lib/logger";
 
 const SITE_ID = process.env.DEFAULT_SITE_ID ?? "prc";
 
-/**
- * Single hub store: every funnel event belongs to the one site. (The old
- * prc16 host/path attribution is gone with the store split — /16 pages that
- * are still reachable attribute here too, which is what the dashboard wants.)
- */
-function resolveEventSiteId(_host: string, _path?: string | null): string {
-  return SITE_ID;
-}
-
 export type FunnelEventInput = {
+  eventId?: string;
   type: FunnelEventType | string;
   path?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -40,23 +33,13 @@ export type FunnelEventInput = {
 type Ids = { sessionId: string | null; visitorId: string | null; isBot: boolean };
 
 function idsFromRequest(req: NextRequest): Ids {
+  const sid = req.cookies.get(SESSION_COOKIE)?.value;
+  const vid = req.cookies.get(VISITOR_COOKIE)?.value;
   return {
-    sessionId: req.cookies.get(SESSION_COOKIE)?.value ?? null,
-    visitorId: req.cookies.get(VISITOR_COOKIE)?.value ?? null,
+    sessionId: isTrackingUuid(sid) ? sid : null,
+    visitorId: isTrackingUuid(vid) ? vid : null,
     isBot: isBotUA(req.headers.get("user-agent")),
   };
-}
-
-/** Keep metadata small + JSON-safe; drop anything non-plain. */
-function cleanMetadata(m: unknown): Record<string, unknown> {
-  if (!m || typeof m !== "object") return {};
-  try {
-    const json = JSON.stringify(m);
-    if (json.length > 4000) return {}; // oversized → drop, never store blobs
-    return JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
 }
 
 /** Bulk-insert a batch of funnel events for one request's session. */
@@ -66,49 +49,40 @@ export async function recordFunnelEvents(
 ): Promise<void> {
   if (!items.length) return;
   const { sessionId, visitorId, isBot } = idsFromRequest(req);
-  const host = req.headers.get("host")?.toLowerCase() ?? "";
+  if (isBot) return;
 
   const rows = items
-    .filter((e) => isFunnelEvent(String(e.type)))
-    .slice(0, 50)
+    .filter((e) => e && typeof e === "object" && isFunnelEvent(String(e.type)))
+    .filter((e) => !e.path || shouldTrackPath(cleanTrackingPath(e.path) ?? ""))
+    .slice(0, MAX_FUNNEL_BATCH)
     .map((e) => ({
-      siteId: resolveEventSiteId(host, e.path),
+      ...(isTrackingUuid(e.eventId) ? { id: e.eventId } : {}),
+      siteId: SITE_ID,
       sessionId,
       visitorId,
       type: String(e.type),
-      path: e.path ? String(e.path).slice(0, 512) : null,
-      metadata: cleanMetadata(e.metadata),
+      path: cleanTrackingPath(e.path),
+      metadata: cleanFunnelMetadata(e.metadata),
       orderId: e.orderId ? String(e.orderId).slice(0, 64) : null,
       isBot,
     }));
 
   if (!rows.length) return;
   try {
-    await db.insert(funnelEvents).values(rows);
-  } catch (err) {
-    logError("funnel:record-batch", err, { count: rows.length });
-  }
-
-  // Keep the session's liveness fresh straight from this batched beacon,
-  // instead of the per-navigation /api/track round-trip the middleware used to
-  // fire. This only UPDATEs an existing row (the session was INSERTed
-  // server-side on its first hit), so it never creates rows and never touches
-  // first-touch attribution — it moves just last_seen_at (the live-visitors
-  // gauge) and the pageview tally off the per-navigation critical path. Bots
-  // are filtered out of every dashboard, so bumping their rows would be waste.
-  if (sessionId && !isBot) {
-    const pageviews = rows.filter((r) => r.type === "page_view").length;
-    try {
-      await db
-        .update(analyticsSessions)
-        .set({
+    await db.transaction(async (tx) => {
+      const inserted = await tx.insert(funnelEvents).values(rows)
+        .onConflictDoNothing({ target: funnelEvents.id })
+        .returning({ type: funnelEvents.type });
+      if (sessionId && visitorId && inserted.length > 0) {
+        const pageviews = inserted.filter((r) => r.type === "page_view").length;
+        await tx.update(analyticsSessions).set({
           lastSeenAt: new Date(),
           pageviewCount: sql`${analyticsSessions.pageviewCount} + ${pageviews}`,
-        })
-        .where(eq(analyticsSessions.id, sessionId));
-    } catch (err) {
-      logError("funnel:session-bump", err, { sessionId });
-    }
+        }).where(and(eq(analyticsSessions.id, sessionId), eq(analyticsSessions.visitorId, visitorId)));
+      }
+    });
+  } catch (err) {
+    logError("funnel:record-batch", err, { count: rows.length });
   }
 }
 
@@ -119,7 +93,13 @@ export async function recordServerFunnelEvent(
   metadata?: Record<string, unknown>,
   opts?: { path?: string | null; orderId?: string | null },
 ): Promise<void> {
+  // Order creation retries may execute this hook again. Use a stable UUID in
+  // the existing primary key so retries cannot duplicate authoritative events.
+  const digest = type === "order_submitted" && opts?.orderId
+    ? createHash("sha256").update(`${SITE_ID}:${type}:${opts.orderId}`).digest("hex")
+    : null;
+  const eventId = digest ? `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}` : undefined;
   await recordFunnelEvents(req, [
-    { type, metadata: metadata ?? {}, path: opts?.path ?? null, orderId: opts?.orderId ?? null },
+    { eventId, type, metadata: metadata ?? {}, path: opts?.path ?? null, orderId: opts?.orderId ?? null },
   ]);
 }

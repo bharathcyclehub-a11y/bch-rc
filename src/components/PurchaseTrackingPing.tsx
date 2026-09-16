@@ -4,11 +4,9 @@
  * Fires the GA4 + Meta Pixel + CAPI `Purchase` event exactly once per order
  * when the order success page mounts.
  *
- * Idempotency: stores a flag in sessionStorage keyed by orderId so a refresh
- * doesn't re-fire (double-count in Meta = wasted ad spend on phantom
- * "winning" creatives). sessionStorage (not localStorage) means a fresh
- * browser session can re-track if the buyer comes back to the link in a
- * new window weeks later — that's a different actual visit.
+ * Idempotency: persists an order flag across visits. Reopening an old order
+ * is another page view, never another purchase. Meta also receives a stable
+ * order-based event ID; GA receives the order as its transaction ID.
  *
  * Lives in its own component so the order success page can stay a server
  * component (and read DB straight). This tiny client island is the only
@@ -16,8 +14,10 @@
  */
 
 import { useEffect } from "react";
-import { trackPurchase } from "@/lib/analytics-client";
+import { consentGranted, trackPurchase } from "@/lib/analytics-client";
 import { trackFunnel } from "@/lib/funnel-client";
+
+const firedInMemory = new Set<string>();
 
 type Props = {
   orderId: string;
@@ -39,28 +39,37 @@ type Props = {
 
 export default function PurchaseTrackingPing(props: Props) {
   useEffect(() => {
-    const key = `prc:fired:purchase:${props.orderId}`;
-    if (typeof window === "undefined") return;
-    if (window.sessionStorage?.getItem(key)) return;
-    try {
-      window.sessionStorage?.setItem(key, "1");
-    } catch {
-      // Private mode etc. — fail soft, fire anyway.
-    }
-    trackPurchase({
-      orderId: props.orderId,
-      totalInr: props.totalInr,
-      itemCount: props.itemCount,
-      paymentMethod: props.paymentMethod,
-      email: props.email ?? null,
-      phone: props.phone ?? null,
-      contents: props.contents,
-    });
-    trackFunnel(
+    const once = (channel: string, send: () => void) => {
+      const key = `prc:fired:purchase:${props.orderId}:${channel}`;
+      if (firedInMemory.has(key)) return;
+      try {
+        if (window.localStorage.getItem(key)) return;
+      } catch { /* Storage may be unavailable; retain in-memory deduplication. */ }
+      send();
+      firedInMemory.add(key);
+      try { window.localStorage.setItem(key, "1"); } catch { /* Best effort. */ }
+    };
+    const input = {
+      orderId: props.orderId, totalInr: props.totalInr, itemCount: props.itemCount,
+      paymentMethod: props.paymentMethod, email: props.email ?? null,
+      phone: props.phone ?? null, contents: props.contents,
+    };
+    once("funnel", () => trackFunnel(
       "purchase",
       { totalInr: props.totalInr, itemCount: props.itemCount, paymentMethod: props.paymentMethod },
       { orderId: props.orderId, immediate: true },
-    );
+    ));
+    const sendReady = () => {
+      if (window.gtag) once("ga", () => trackPurchase(input, { ga: true, meta: false }));
+      if (window.fbq && consentGranted()) once("meta", () => trackPurchase(input, { ga: false, meta: true }));
+    };
+    sendReady();
+    window.addEventListener("prc:analytics-ready", sendReady);
+    window.addEventListener("prc:consent", sendReady);
+    return () => {
+      window.removeEventListener("prc:analytics-ready", sendReady);
+      window.removeEventListener("prc:consent", sendReady);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.orderId]);
 

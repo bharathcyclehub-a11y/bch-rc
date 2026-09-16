@@ -41,11 +41,14 @@ async function tableInfo(name: string) {
 }
 
 async function main() {
-  const target = "product_overrides";
-
-  console.log(`\nBEFORE: ${JSON.stringify(await tableInfo(target)) || "table absent"}`);
-
   const sqlText = readFileSync(file, "utf8");
+  // These migrations contain plain DDL. Verify the objects in THIS file,
+  // rather than the unrelated product_overrides table from the original script.
+  const tables = [...sqlText.matchAll(/CREATE TABLE IF NOT EXISTS (?:public\.)?([a-z_][a-z0-9_]*)/gi)].map((m) => m[1]);
+  const indexes = [...sqlText.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS ([a-z_][a-z0-9_]*)/gi)].map((m) => m[1]);
+  if (tables.length === 0 && indexes.length === 0) {
+    throw new Error("No supported CREATE TABLE/INDEX targets found to verify.");
+  }
   const stmts = statements(sqlText);
   console.log(`\nApplying ${stmts.length} statement(s) from ${file}\n`);
 
@@ -61,18 +64,22 @@ async function main() {
     }
   }
 
-  const after = await tableInfo(target);
-  console.log(`\nAFTER: ${JSON.stringify(after)}`);
-
-  if (!after) {
-    console.error("\nVERIFY FAILED: table still absent");
-    process.exit(1);
+  for (const table of tables) {
+    const after = await tableInfo(table);
+    if (!after) throw new Error(`VERIFY FAILED: ${table} is absent`);
+    // Enforce RLS only when this migration explicitly enables it.
+    const enablesRls = new RegExp(`ALTER TABLE (?:public\\.)?${table} ENABLE ROW LEVEL SECURITY`, "i").test(sqlText);
+    if (enablesRls && after.rls_enabled !== true) throw new Error(`VERIFY FAILED: ${table} RLS is not enabled`);
+    console.log(`  verified table ${table}${enablesRls ? " (RLS enabled)" : ""}`);
   }
-  if (after.rls_enabled !== true) {
-    console.error("\nVERIFY FAILED: RLS is NOT enabled — table is exposed via the anon REST API");
-    process.exit(1);
+  for (const index of indexes) {
+    const [row] = await db.execute(sql`
+      SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = ${index}
+    `);
+    if (!row) throw new Error(`VERIFY FAILED: ${index} is absent`);
+    console.log(`  verified index ${index}`);
   }
-  console.log("\nVERIFIED: table exists, RLS enabled, 0 policies (deny-all to anon)\n");
+  console.log("\nVERIFIED: all migration targets exist.\n");
   process.exit(0);
 }
 

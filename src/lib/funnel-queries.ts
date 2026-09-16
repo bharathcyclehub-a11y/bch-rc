@@ -33,6 +33,7 @@ import {
   getVisitors,
   warnIfInsane,
 } from "@/lib/analytics-service";
+import type { MetricWindow } from "@/lib/analytics-range";
 import {
   clampPct,
   detectFunnelAnomalies,
@@ -43,24 +44,19 @@ export type FunnelStageResult = {
   key: string;
   label: string;
   visitors: number;
-  /** % of the previous stage that made it here (the step conversion). */
+  /** Ratio to the previous independent stage count; not a cohort conversion. */
   stepPct: number;
-  /** % of the top-of-funnel that reached here (overall conversion). */
+  /** Ratio to recorded visitors; buyer and visitor identities may differ. */
   fromTopPct: number;
-  /** Visitors lost vs the previous stage. */
+  /** Numerical count difference; not confirmed abandonment. */
   dropped: number;
   /** True when this stage is measured from the client-side event stream. */
   clientTracked: boolean;
-  /**
-   * Coverage-adjusted visitor ESTIMATE. Client-tracked stages are grossed up by
-   * 1/coverage to the same 100%-population scale as the server-side stages, so a
-   * beacon-suppressed numerator isn't compared against a complete denominator.
-   * Server stages keep their exact count. See the adjustment block below.
-   */
+  /** Compatibility alias for observed visitors; no missing events are estimated. */
   adjustedVisitors: number;
-  /** Step conversion computed on the adjusted (coverage-corrected) counts. */
+  /** Compatibility alias for the observed stage ratio. */
   adjustedStepPct: number;
-  /** From-top conversion computed on the adjusted (coverage-corrected) counts. */
+  /** Compatibility alias for the observed visitor ratio. */
   adjustedFromTopPct: number;
 };
 
@@ -69,7 +65,7 @@ export type FunnelReport = {
   stages: FunnelStageResult[];
   /** CANONICAL unique visitors (analytics_sessions) — matches every other page. */
   visitors: number;
-  /** Visitors that emitted a client-side page_view event. <= visitors. */
+  /** Visitors that emitted a client page_view; can differ from session population. */
   trackedVisitors: number;
   /** trackedVisitors / visitors, as a %. Below ~90% the middle stages undercount. */
   coveragePct: number;
@@ -90,10 +86,12 @@ const CLIENT_TRACKED_KEYS = new Set(["product", "cart", "checkout"]);
 export async function getFunnelReport(
   siteIds: string[],
   windowDays: number,
+  window?: MetricWindow,
 ): Promise<FunnelReport> {
-  const days = Math.max(1, Math.min(90, Math.floor(windowDays) || 1));
-  const win = analyticsWindow(days);
+  const win = window ?? analyticsWindow(windowDays);
+  const days = win.days;
   const startIso = win.start.toISOString();
+  const endIso = win.end.toISOString();
 
   const siteFilter = sql`array[${sql.join(
     siteIds.map((s) => sql`${s}`),
@@ -105,9 +103,9 @@ export async function getFunnelReport(
 
   const [visitors, trackedVisitors, stageRows, orderRows] = await Promise.all([
     // Stage 1 — canonical, server-side, identical to Dashboard + Analytics.
-    getVisitors(siteIds, win.start),
+    getVisitors(siteIds, win.start, win.end),
     // Coverage denominator check — how many of those emitted client events.
-    getTrackedVisitors(siteIds, win.start),
+    getTrackedVisitors(siteIds, win.start, win.end),
     // Stages 2-4 — behavioural, only observable client-side.
     db.execute(sql`
       SELECT
@@ -116,7 +114,7 @@ export async function getFunnelReport(
         count(DISTINCT visitor_id) FILTER (WHERE type = 'checkout_started') AS checkout
       FROM funnel_events
       WHERE is_bot = false AND site_id = ANY(${siteFilter})
-        AND created_at >= ${startIso}
+        AND created_at >= ${startIso} AND created_at < ${endIso}
     `) as unknown as Promise<Array<Record<string, unknown>>>,
     // Stages 5-6 — the orders ledger, as distinct BUYERS (people, not rows).
     db.execute(sql`
@@ -125,7 +123,7 @@ export async function getFunnelReport(
         count(DISTINCT customer_id) FILTER (WHERE status IN (${paidStatusList})) AS paid
       FROM orders
       WHERE site_id = ANY(${siteFilter})
-        AND placed_at >= ${startIso}
+        AND placed_at >= ${startIso} AND placed_at < ${endIso}
     `) as unknown as Promise<Array<Record<string, unknown>>>,
   ]);
 
@@ -138,13 +136,11 @@ export async function getFunnelReport(
   let prev = 0;
   const stages: FunnelStageResult[] = FUNNEL_STAGES.map((s, i) => {
     const stageVisitors = n(counts[s.key]);
-    // Clamp to 100%: a downstream stage can read higher than the previous one
-    // when the two are measured from different sources (buyers from the ledger
-    // vs client-tracked visitors). Flagged as an anomaly rather than rendered
-    // as an impossible > 100% step.
-    const stepPct = i === 0 ? 100 : clampPct(safePct(stageVisitors, prev));
+    // A ratio may exceed 100% because stages are independent. Preserve it;
+    // only a visual bar width may be clamped, never a reported measurement.
+    const stepPct = i === 0 ? 100 : safePct(stageVisitors, prev);
     const dropped = i === 0 ? 0 : Math.max(0, prev - stageVisitors);
-    const fromTopPct = clampPct(safePct(stageVisitors, visitors));
+    const fromTopPct = safePct(stageVisitors, visitors);
     prev = stageVisitors;
     return {
       key: s.key,
@@ -154,62 +150,26 @@ export async function getFunnelReport(
       fromTopPct,
       dropped,
       clientTracked: CLIENT_TRACKED_KEYS.has(s.key),
-      // Filled by the coverage-adjustment pass below.
+      // Preserve legacy field names while showing only observed counts.
       adjustedVisitors: stageVisitors,
       adjustedStepPct: stepPct,
       adjustedFromTopPct: fromTopPct,
     };
   });
 
-  // ── Coverage-adjusted funnel ──────────────────────────────────────
-  // `visit`, `order`, `paid` are server-side and complete; `product`, `cart`,
-  // `checkout` come from the client beacon that ad-blockers suppress. Dividing a
-  // suppressed numerator by the complete visitor base understates every client
-  // stage — mildly at 86% coverage, brutally on a 35%-coverage day (a 9.5% that
-  // is really 27%). We gross each client stage up by 1/coverage onto the same
-  // 100%-population scale as the server stages, then clamp each to the stage
-  // above so the funnel stays monotonic. This is an ESTIMATE (it assumes blocked
-  // visitors convert like tracked ones); the raw `visitors` stay on every stage.
-  const coverageFrac =
-    trackedVisitors > 0 && visitors > 0
-      ? Math.min(1, trackedVisitors / visitors)
-      : 1;
-  let prevAdj = 0;
-  for (let i = 0; i < stages.length; i++) {
-    const s = stages[i];
-    const grossed =
-      s.clientTracked && coverageFrac > 0
-        ? Math.round(s.visitors / coverageFrac)
-        : s.visitors;
-    const adjustedVisitors = i === 0 ? grossed : Math.min(grossed, prevAdj);
-    s.adjustedVisitors = adjustedVisitors;
-    s.adjustedStepPct = i === 0 ? 100 : clampPct(safePct(adjustedVisitors, prevAdj));
-    s.adjustedFromTopPct = clampPct(safePct(adjustedVisitors, visitors));
-    prevAdj = adjustedVisitors;
-  }
-
   const anomalies = detectFunnelAnomalies(
     stages.map((s) => ({ label: s.label, visitors: s.visitors })),
   );
-
-  // Rank leaks on the COVERAGE-ADJUSTED drop, not the raw one — otherwise a
-  // low-coverage day makes the beacon-suppressed Visit→Product step look like
-  // the biggest leak when it's mostly tracking loss.
-  let biggestLeak: FunnelReport["biggestLeak"] = null;
-  for (let i = 1; i < stages.length; i++) {
-    const adjDropped = Math.max(
-      0,
-      stages[i - 1].adjustedVisitors - stages[i].adjustedVisitors,
-    );
-    if (!biggestLeak || adjDropped > biggestLeak.dropped) {
-      biggestLeak = {
-        fromLabel: stages[i - 1].label,
-        toLabel: stages[i].label,
-        dropped: adjDropped,
-        stepPct: stages[i].adjustedStepPct,
-      };
-    }
+  if (trackedVisitors > visitors) {
+    anomalies.push("More visitors emitted page views than have recorded sessions in this period. Session writes, identities, or date boundaries need checking; coverage cannot be estimated reliably.");
   }
+  if (!trackedVisitors && visitors > 0) {
+    anomalies.push("No client page views were recorded for this period. Behavioural stages are unmeasured; zero recorded events does not prove that nobody reached them.");
+  }
+
+  // These counts are not linked into a common ordered cohort. A numerical
+  // difference cannot establish where individual customers abandoned checkout.
+  const biggestLeak: FunnelReport["biggestLeak"] = null;
 
   const [blockedRows, failRows, svcRows] = await Promise.all([
     db.execute(sql`
@@ -219,7 +179,7 @@ export async function getFunnelReport(
       FROM funnel_events
       WHERE type = 'serviceability_checked' AND metadata->>'serviceable' = 'false'
         AND is_bot = false AND site_id = ANY(${siteFilter})
-        AND created_at >= ${startIso}
+        AND created_at >= ${startIso} AND created_at < ${endIso}
       GROUP BY 1 ORDER BY checks DESC LIMIT 15
     `),
     db.execute(sql`
@@ -227,7 +187,7 @@ export async function getFunnelReport(
              count(*) AS n
       FROM funnel_events
       WHERE type = 'payment_failed' AND is_bot = false AND site_id = ANY(${siteFilter})
-        AND created_at >= ${startIso}
+        AND created_at >= ${startIso} AND created_at < ${endIso}
       GROUP BY 1 ORDER BY n DESC LIMIT 10
     `),
     db.execute(sql`
@@ -235,7 +195,7 @@ export async function getFunnelReport(
              count(*) FILTER (WHERE metadata->>'serviceable' = 'false') AS blocked
       FROM funnel_events
       WHERE type = 'serviceability_checked' AND is_bot = false AND site_id = ANY(${siteFilter})
-        AND created_at >= ${startIso}
+        AND created_at >= ${startIso} AND created_at < ${endIso}
     `),
   ]);
 
