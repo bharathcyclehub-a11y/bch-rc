@@ -285,7 +285,7 @@ export default function PDPClient({
             Car"), so strip a leading scale token to avoid "1:16 · 1:16 Drift
             Car". One line only — Google still indexes scale + class here. */}
         <p className="text-[10px] sm:text-xs font-mono uppercase tracking-widest text-brand-red">
-          {sku.kind === "Ride-on" ? "Ride-on" : `${sku.scale} ${sku.kind ?? "die-cast RC"}`} · {sku.bodyShape.replace(/^1:\d+\s+/i, "")}
+          {sku.scale} {sku.kind ?? "die-cast RC"} · {sku.bodyShape.replace(/^1:\d+\s+/i, "")}
         </p>
         <h1 className="text-2xl sm:text-4xl font-bold text-brand-ink mt-0.5 leading-tight text-balance">
           {sku.name}

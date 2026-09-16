@@ -6,7 +6,6 @@ import {
   getHubPoloSkus,
   getHub43Skus,
   getHubHobbySkus,
-  getHubBikeSkus,
   type Sku,
 } from "@/lib/products";
 
@@ -27,9 +26,7 @@ export const HUB_CATEGORIES: HubCat[] = [
   { key: "polo", label: "Polo", img: "/landing/cat-polo.webp", skus: getHubPoloSkus() },
   { key: "s43", label: "1:43 Scale", img: null, skus: getHub43Skus() },
   { key: "drone", label: "Drone", img: "/landing/cat-drone.webp", skus: [] },
-  { key: "hobby", label: "Hobby Grade", img: null, skus: getHubHobbySkus() },
-  { key: "bike", label: "Kids E-Bikes", img: null, skus: getHubBikeSkus() },
-];
+  { key: "hobby", label: "Hobby Grade", img: null, skus: getHubHobbySkus() },];
 
 export function getHubCategory(key: string): HubCat | undefined {
   return HUB_CATEGORIES.find((c) => c.key === key);

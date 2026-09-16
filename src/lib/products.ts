@@ -8,15 +8,14 @@
  * MRP carries a ~30-35% strikethrough.
  */
 
-/** Model scale. "Ride-on" is for full-size children's vehicles (no scale). */
-export type Scale = "1:64" | "1:43" | "1:24" | "1:20" | "1:18" | "1:16" | "1:14" | "1:12" | "1:10" | "Ride-on";
+export type Scale = "1:64" | "1:43" | "1:24" | "1:20" | "1:18" | "1:16" | "1:14" | "1:12" | "1:10";
 
 /** Hub category a SKU belongs to. Defaults are derived from scale (1:64→mini,
  *  1:16→big, 1:20→s20); `construction` is an explicit override for the RC
  *  trucks/diggers, which sit on the 1:64 chassis but belong in their own tile.
- *  `hobby` (big-scale crawlers/racers), `s43` and `bike` fill their own tiles —
- *  and keep a 1:16 crawler out of the 1:16 drift lineup. */
-export type ProductCategory = "mini" | "big" | "s20" | "construction" | "polo" | "hobby" | "s43" | "bike";
+ *  `hobby` (big-scale crawlers/racers) and `s43` fill their own tiles — and
+ *  keep a 1:16 crawler out of the 1:16 drift lineup. */
+export type ProductCategory = "mini" | "big" | "s20" | "construction" | "polo" | "hobby" | "s43";
 
 /** One row of the PDP spec table. */
 export type SpecRow = { label: string; value: string };
@@ -101,7 +100,7 @@ export type Sku = {
   specRows?: SpecRow[];
   /** Box contents. When unset the PDP shows the legacy 1:64 drift-car list. */
   inBox?: string[];
-  /** PDP kicker material, e.g. "RC" or "Ride-on". Unset = the legacy
+  /** PDP kicker material, e.g. "RC". Unset = the legacy
    *  "die-cast RC" line, which only the die-cast lineup can truthfully claim. */
   kind?: string;
 };
@@ -1161,12 +1160,15 @@ export const PRODUCTS: Sku[] = [
     specs: { lengthMM: 110, drive: "2WD", topSpeedKmh: 5, batteryMin: 20, chargeMin: 60, rangeM: 16, minAge: 6, led: "Work lamp", drift: "No" },
   },
   // ---- Sep 2026 intake (photo shoot 2026-09-15) ----------------------------
-  // PRICE_REVIEW_REQUIRED + STOCK_REVIEW_REQUIRED: price and colour stock are 0
-  // until the owner confirms them, so every SKU here stays `comingSoon` (hub
-  // teaser only: no price, no buy, PDP 404). Copy and spec rows state only what
-  // is verified from the product or its remote; model-number specs are added
-  // once the box labels are confirmed. Gallery = 4 images; extra colours get
-  // their own hero and share the primary colour's images 2-4.
+  // Prices are the owner's COD prices from the Bharath Cycle Hub price list
+  // (2026-09-16; .50 rounded to the rupee). No MRP was given, so mrpINR equals
+  // retailINR and no strikethrough shows. Stock = listed qty (code `stock` for
+  // colour variants, `inventory` rows in the DB). The Huina cement mixer is not
+  // on the list: ₹6,375 matches the owner's price for its 1:18 Huina sibling
+  // (1533 dump truck) — PRICE_REVIEW_REQUIRED + STOCK_REVIEW_REQUIRED.
+  // Spec rows state only what is verified from the product, its remote or the
+  // confirmed model. Gallery = 4 images; extra colours get their own hero and
+  // share the primary colour's images 2-4.
   {
     id: "mustang-gt500", slug: "mustang-gt500", kind: "RC", scale: "1:10", category: "hobby",
     name: "Mustang GT500", tagline: "1:10 muscle-car RC · twin racing stripes · race wing",
@@ -1306,15 +1308,15 @@ export const PRODUCTS: Sku[] = [
     inBox: ["1:43 RC car", "2.4GHz pistol-grip remote"],
   },
   {
-    id: "cement-mixer-truck-18", slug: "cement-mixer-truck-18", kind: "RC", scale: "1:18", category: "construction", comingSoon: true,
+    id: "cement-mixer-truck-18", slug: "cement-mixer-truck-18", kind: "RC", scale: "1:18", category: "construction",
     name: "Cement Mixer Truck", tagline: "1:18 RC construction · three-axle mixer",
-    retailINR: 0, mrpINR: 0, badge: "NEW",
+    retailINR: 6375, mrpINR: 6375, badge: "NEW",
     bullets: ["Three-axle concrete-mixer body with white cab", "Black drum with green spiral and green chute", "Six-wheel truck chassis", "Twin-stick gamepad remote"],
     bodyShape: "1:18 mixer truck",
     heroImage: "/products/rcai/cement-mixer-truck-18/default.webp",
     altImages: ["/products/rcai/cement-mixer-truck-18/default-2.webp", "/products/rcai/cement-mixer-truck-18/default-3.webp", "/products/rcai/cement-mixer-truck-18/default-4.webp"],
     specs: {},
-    specRows: [{ label: "Remote", value: "Twin-stick gamepad" }],
+    specRows: [{ label: "Brand", value: "Huina" }, { label: "Remote", value: "Twin-stick gamepad" }],
     inBox: ["1:18 RC mixer truck", "Gamepad remote"],
   },
   {
@@ -1328,33 +1330,6 @@ export const PRODUCTS: Sku[] = [
     specs: {},
     specRows: [{ label: "Remote", value: "Twin-stick gamepad" }],
     inBox: ["1:18 RC tractor unit", "Low-bed trailer", "Gamepad remote"],
-  },
-  {
-    id: "kids-electric-dirt-bike", slug: "kids-electric-dirt-bike", kind: "Ride-on", scale: "Ride-on", category: "bike", comingSoon: true,
-    name: "Kids Electric Dirt Bike", tagline: "Kids' electric mini dirt bike · 4 colours",
-    retailINR: 0, mrpINR: 0, badge: "NEW",
-    bullets: ["Motocross-style electric dirt bike sized for kids", "Coil-spring rear shock and hand-lever disc brake", "Digital display on the handlebars", "Knobby off-road tyres and side kickstand"],
-    bodyShape: "Kids' electric dirt bike",
-    heroImage: "/products/rcai/kids-electric-dirt-bike/green.webp",
-    altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"],
-    colors: [
-      { name: "Green", slug: "green", swatch: "#7cc91e", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/green.webp",
-        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
-      { name: "Red", slug: "red", swatch: "#dc2626", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/red.webp",
-        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
-      { name: "Yellow", slug: "yellow", swatch: "#facc15", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/yellow.webp",
-        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
-      { name: "Blue", slug: "blue", swatch: "#1d4ed8", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/blue.webp",
-        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
-    ],
-    specs: {},
-    specRows: [
-      { label: "Brakes", value: "Hand-lever disc brake" },
-      { label: "Suspension", value: "Coil-spring rear shock" },
-      { label: "Display", value: "Handlebar digital display" },
-      { label: "Colours", value: "Green, Red, Yellow, Blue" },
-    ],
-    inBox: ["Kids' electric dirt bike"],
   },
   {
     id: "qa-1rs",
@@ -1473,11 +1448,6 @@ export function getHub43Skus(): Sku[] {
 /** Hub "Hobby Grade" tile — big-scale crawlers, trucks and racers. */
 export function getHubHobbySkus(): Sku[] {
   return PRODUCTS.filter((p) => p.category === "hobby" && !p.hidden && !p.internal).sort(bySoon);
-}
-
-/** Hub "Kids E-Bikes" tile — children's electric ride-ons. */
-export function getHubBikeSkus(): Sku[] {
-  return PRODUCTS.filter((p) => p.category === "bike" && !p.hidden && !p.internal).sort(bySoon);
 }
 
 /** Hub "1:20 Scale" tile — 1:20 products, minus those pulled into their own
