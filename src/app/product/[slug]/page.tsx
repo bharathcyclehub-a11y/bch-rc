@@ -121,12 +121,11 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const base = PRODUCTS.find((p) => p.slug === slug);
-  if (!base) return { title: "Not Found" };
-  const sku = applyOverride(base, await getOverrideForSku(base.id));
-  // Unreachable SKUs 404 in the page below; don't leak their name or a
-  // placeholder price through the <title> of that 404.
-  if (sku.hidden || sku.internal || sku.comingSoon) return { title: "Not Found" };
+  const sku = PRODUCTS.find((p) => p.slug === slug);
+  if (!sku || sku.hidden || sku.internal) return { title: "Not Found" };
+  // Coming-soon SKUs are public hub teasers without a price yet: keep the name,
+  // never a placeholder price. (No DB lookup here — metadata stays query-free.)
+  if (sku.comingSoon) return { title: sku.name };
 
   const url = `/product/${sku.slug}`;
   const fullDescription =

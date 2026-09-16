@@ -87,12 +87,16 @@ export default function PDPStickyCTA({
               <span className="text-lg font-bold text-brand-ink">
                 {formatINR(sku.retailINR)}
               </span>
-              <span className="text-xs text-brand-ink-soft line-through">
-                {formatINR(sku.mrpINR)}
-              </span>
-              <span className="text-[10px] font-mono uppercase tracking-widest text-success font-semibold">
-                Save {formatINR(sku.mrpINR - sku.retailINR)}
-              </span>
+              {sku.mrpINR > sku.retailINR && (
+                <>
+                  <span className="text-xs text-brand-ink-soft line-through">
+                    {formatINR(sku.mrpINR)}
+                  </span>
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-success font-semibold">
+                    Save {formatINR(sku.mrpINR - sku.retailINR)}
+                  </span>
+                </>
+              )}
             </div>
           </div>
 

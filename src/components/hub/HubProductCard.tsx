@@ -149,6 +149,7 @@ export function HubProductCard({
    * true numbers that call each other liars. Same helper, same basis, no
    * change to what anyone is charged.
    */
+  const hasMrp = sku.mrpINR > sku.retailINR;
   const saveINR = sku.mrpINR - online;
   const offPct = calcDiscountPct(sku.mrpINR, online);
 
@@ -378,23 +379,26 @@ export function HubProductCard({
                 <span className="text-xl font-extrabold leading-none tracking-tight text-brand-ink sm:text-2xl">
                   {formatINR(online)}
                 </span>
-                {offPct > 0 && (
+                {hasMrp && offPct > 0 && (
                   <span className="shrink-0 rounded-md bg-brand-red px-1.5 py-0.5 text-[10px] font-extrabold uppercase leading-none tracking-wide text-white">
                     {offPct}% off
                   </span>
                 )}
               </div>
-              <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 leading-tight">
-                <span className="text-[11px] text-brand-ink-soft sm:text-xs">
-                  MRP{" "}
-                  <span className="font-semibold text-brand-ink line-through decoration-brand-red/70 decoration-2">
-                    {formatINR(sku.mrpINR)}
+              {/* No MRP above the selling price → no struck anchor to show. */}
+              {hasMrp && (
+                <div className="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 leading-tight">
+                  <span className="text-[11px] text-brand-ink-soft sm:text-xs">
+                    MRP{" "}
+                    <span className="font-semibold text-brand-ink line-through decoration-brand-red/70 decoration-2">
+                      {formatINR(sku.mrpINR)}
+                    </span>
                   </span>
-                </span>
-                {saveINR > 0 && (
-                  <span className="text-[11px] font-bold text-brand-red sm:text-xs">Save {formatINR(saveINR)}</span>
-                )}
-              </div>
+                  {saveINR > 0 && (
+                    <span className="text-[11px] font-bold text-brand-red sm:text-xs">Save {formatINR(saveINR)}</span>
+                  )}
+                </div>
+              )}
               <EmiBadge priceInr={online} variant="card" className="mt-1" />
             </div>
 

@@ -406,12 +406,21 @@ export default function PDPClient({
             <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest text-brand-ink-soft">
               online
             </span>
-            <span className="text-base sm:text-lg text-brand-ink-soft line-through">
-              {formatINR(sku.mrpINR)}
-            </span>
-            <span className="text-xs sm:text-sm font-bold bg-success text-white px-2.5 py-1 rounded-full shadow-sm">
-              Save {formatINR(savings + 100)} · {pct}% off
-            </span>
+            {savings > 0 ? (
+              <>
+                <span className="text-base sm:text-lg text-brand-ink-soft line-through">
+                  {formatINR(sku.mrpINR)}
+                </span>
+                <span className="text-xs sm:text-sm font-bold bg-success text-white px-2.5 py-1 rounded-full shadow-sm">
+                  Save {formatINR(savings + 100)} · {pct}% off
+                </span>
+              </>
+            ) : (
+              // No MRP above the selling price — only the prepaid saving is real.
+              <span className="text-xs sm:text-sm font-bold bg-success text-white px-2.5 py-1 rounded-full shadow-sm">
+                Save {formatINR(100)} paying online
+              </span>
+            )}
           </div>
           <p className="text-xs sm:text-sm text-brand-ink-soft mt-1.5">
             or {formatINR(sku.retailINR)} cash on delivery · all taxes included
