@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
@@ -15,7 +15,7 @@ import {
   Lock,
   BadgeCheck,
 } from "lucide-react";
-import type { Sku } from "@/lib/products";
+import { pdpSpecRows, type Sku } from "@/lib/products";
 import { formatINR, calcDiscountPct, cn } from "@/lib/utils";
 
 // SKUs without color variants don't track per-unit stock — cap them at a sane
@@ -285,7 +285,7 @@ export default function PDPClient({
             Car"), so strip a leading scale token to avoid "1:16 · 1:16 Drift
             Car". One line only — Google still indexes scale + class here. */}
         <p className="text-[10px] sm:text-xs font-mono uppercase tracking-widest text-brand-red">
-          {sku.scale} die-cast RC · {sku.bodyShape.replace(/^1:\d+\s+/i, "")}
+          {sku.kind === "Ride-on" ? "Ride-on" : `${sku.scale} ${sku.kind ?? "die-cast RC"}`} · {sku.bodyShape.replace(/^1:\d+\s+/i, "")}
         </p>
         <h1 className="text-2xl sm:text-4xl font-bold text-brand-ink mt-0.5 leading-tight text-balance">
           {sku.name}
@@ -476,12 +476,18 @@ export default function PDPClient({
           </p>
           {/* 2 columns on mobile too — halves the card height */}
           <ul className="mt-1.5 sm:mt-2 grid grid-cols-2 gap-x-3 sm:gap-x-4 gap-y-1 sm:gap-y-1.5 text-[11px] sm:text-sm text-brand-ink">
-            <li>· Die-cast {sku.scale} drift car (assembled)</li>
-            <li>· 2.4 GHz remote</li>
-            <li>· USB-C cable + battery</li>
-            <li>· Spare drift wheel set</li>
-            <li>· Quick-start guide</li>
-            <li>· Premium gift-ready box</li>
+            {sku.inBox ? (
+              sku.inBox.map((item) => <li key={item}>· {item}</li>)
+            ) : (
+              <>
+                <li>· Die-cast {sku.scale} drift car (assembled)</li>
+                <li>· 2.4 GHz remote</li>
+                <li>· USB-C cable + battery</li>
+                <li>· Spare drift wheel set</li>
+                <li>· Quick-start guide</li>
+                <li>· Premium gift-ready box</li>
+              </>
+            )}
           </ul>
         </div>
 
@@ -553,7 +559,9 @@ export default function PDPClient({
           {[
             { icon: Truck, title: "Ships in 24 hrs", sub: "from Bangalore" },
             { icon: RotateCw, title: "7-Day Free", sub: "Replacement" },
-            { icon: Shield, title: `Age ${sku.specs.minAge}+`, sub: "Recommended" },
+            sku.specs.minAge !== undefined
+              ? { icon: Shield, title: `Age ${sku.specs.minAge}+`, sub: "Recommended" }
+              : { icon: Shield, title: "Pan-India", sub: "Cash on delivery" },
           ].map(({ icon: Icon, title, sub }) => (
             <div
               key={title}
@@ -598,26 +606,12 @@ export default function PDPClient({
           </summary>
           <div className="px-5 py-4 text-sm">
             <dl className="grid grid-cols-2 gap-y-2">
-              <dt className="text-brand-ink-soft">Scale</dt>
-              <dd className="text-brand-ink">{sku.scale}</dd>
-              <dt className="text-brand-ink-soft">Length</dt>
-              <dd className="text-brand-ink">{sku.specs.lengthMM} mm</dd>
-              <dt className="text-brand-ink-soft">Drive</dt>
-              <dd className="text-brand-ink">{sku.specs.drive}</dd>
-              <dt className="text-brand-ink-soft">Top speed</dt>
-              <dd className="text-brand-ink">{sku.specs.topSpeedKmh} km/h</dd>
-              <dt className="text-brand-ink-soft">Battery life</dt>
-              <dd className="text-brand-ink">{sku.specs.batteryMin} min</dd>
-              <dt className="text-brand-ink-soft">Charge time</dt>
-              <dd className="text-brand-ink">{sku.specs.chargeMin} min</dd>
-              <dt className="text-brand-ink-soft">Range</dt>
-              <dd className="text-brand-ink">{sku.specs.rangeM} m</dd>
-              <dt className="text-brand-ink-soft">LED</dt>
-              <dd className="text-brand-ink">{sku.specs.led}</dd>
-              <dt className="text-brand-ink-soft">Drift mode</dt>
-              <dd className="text-brand-ink">{sku.specs.drift}</dd>
-              <dt className="text-brand-ink-soft">Charger</dt>
-              <dd className="text-brand-ink">USB-C</dd>
+              {pdpSpecRows(sku).map((row) => (
+                <Fragment key={row.label}>
+                  <dt className="text-brand-ink-soft">{row.label}</dt>
+                  <dd className="text-brand-ink">{row.value}</dd>
+                </Fragment>
+              ))}
             </dl>
           </div>
         </details>

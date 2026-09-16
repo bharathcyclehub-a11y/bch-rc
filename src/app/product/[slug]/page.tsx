@@ -121,8 +121,12 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const sku = PRODUCTS.find((p) => p.slug === slug);
-  if (!sku) return { title: "Not Found" };
+  const base = PRODUCTS.find((p) => p.slug === slug);
+  if (!base) return { title: "Not Found" };
+  const sku = applyOverride(base, await getOverrideForSku(base.id));
+  // Unreachable SKUs 404 in the page below; don't leak their name or a
+  // placeholder price through the <title> of that 404.
+  if (sku.hidden || sku.internal || sku.comingSoon) return { title: "Not Found" };
 
   const url = `/product/${sku.slug}`;
   const fullDescription =

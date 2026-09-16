@@ -4,6 +4,9 @@ import {
   getHub20Skus,
   getHubConstructionSkus,
   getHubPoloSkus,
+  getHub43Skus,
+  getHubHobbySkus,
+  getHubBikeSkus,
   type Sku,
 } from "@/lib/products";
 
@@ -22,9 +25,10 @@ export const HUB_CATEGORIES: HubCat[] = [
   { key: "s20", label: "1:20 Scale", img: "/landing/cat-s20.webp", skus: getHub20Skus() },
   { key: "construction", label: "Construction", img: "/landing/cat-construction.webp", skus: getHubConstructionSkus() },
   { key: "polo", label: "Polo", img: "/landing/cat-polo.webp", skus: getHubPoloSkus() },
-  { key: "s43", label: "1:43 Scale", img: null, skus: [] },
+  { key: "s43", label: "1:43 Scale", img: null, skus: getHub43Skus() },
   { key: "drone", label: "Drone", img: "/landing/cat-drone.webp", skus: [] },
-  { key: "hobby", label: "Hobby Grade", img: null, skus: [] },
+  { key: "hobby", label: "Hobby Grade", img: null, skus: getHubHobbySkus() },
+  { key: "bike", label: "Kids E-Bikes", img: null, skus: getHubBikeSkus() },
 ];
 
 export function getHubCategory(key: string): HubCat | undefined {

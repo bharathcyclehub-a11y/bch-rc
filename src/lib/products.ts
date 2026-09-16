@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PRC Cars — Real product lineup (replaces Storm placeholder SKUs).
  *
  * All 4 are Trasped/Hengguan HG4-series 1:64 chassis with different body shells.
@@ -8,12 +8,18 @@
  * MRP carries a ~30-35% strikethrough.
  */
 
-export type Scale = "1:64" | "1:43" | "1:24" | "1:20" | "1:16";
+/** Model scale. "Ride-on" is for full-size children's vehicles (no scale). */
+export type Scale = "1:64" | "1:43" | "1:24" | "1:20" | "1:18" | "1:16" | "1:14" | "1:12" | "1:10" | "Ride-on";
 
 /** Hub category a SKU belongs to. Defaults are derived from scale (1:64→mini,
  *  1:16→big, 1:20→s20); `construction` is an explicit override for the RC
- *  trucks/diggers, which sit on the 1:64 chassis but belong in their own tile. */
-export type ProductCategory = "mini" | "big" | "s20" | "construction" | "polo";
+ *  trucks/diggers, which sit on the 1:64 chassis but belong in their own tile.
+ *  `hobby` (big-scale crawlers/racers), `s43` and `bike` fill their own tiles —
+ *  and keep a 1:16 crawler out of the 1:16 drift lineup. */
+export type ProductCategory = "mini" | "big" | "s20" | "construction" | "polo" | "hobby" | "s43" | "bike";
+
+/** One row of the PDP spec table. */
+export type SpecRow = { label: string; value: string };
 
 export type ColorVariant = {
   /** Display name, e.g. "Blue", "Multi Colour", "Red & Orange" */
@@ -77,18 +83,52 @@ export type Sku = {
   /** Fixed-price bundle SKU (e.g. the Construction 3-Pack). Purchasable, but
    *  EXCLUDED from the normal product grid — surfaced via its own CTA banner. */
   bundle?: boolean;
+  /** Legacy fixed spec sheet. Every field is optional so a product only states
+   *  what has been verified — a missing field is omitted, never guessed. */
   specs: {
-    lengthMM: number;
-    drive: "2WD" | "4WD";
-    topSpeedKmh: number;
-    batteryMin: number;
-    chargeMin: number;
-    rangeM: number;
-    minAge: number;
-    led: string;
-    drift: string;
+    lengthMM?: number;
+    drive?: "2WD" | "4WD";
+    topSpeedKmh?: number;
+    batteryMin?: number;
+    chargeMin?: number;
+    rangeM?: number;
+    minAge?: number;
+    led?: string;
+    drift?: string;
   };
+  /** Verified spec rows (source-checked). When set, the PDP shows these after
+   *  any `specs` fields and drops the legacy "Charger: USB-C" line. */
+  specRows?: SpecRow[];
+  /** Box contents. When unset the PDP shows the legacy 1:64 drift-car list. */
+  inBox?: string[];
+  /** PDP kicker material, e.g. "RC" or "Ride-on". Unset = the legacy
+   *  "die-cast RC" line, which only the die-cast lineup can truthfully claim. */
+  kind?: string;
 };
+
+/**
+ * Rows for the PDP "Full specs" table. Legacy SKUs render exactly as before
+ * (including the fixed charger line); SKUs with `specRows` show only verified
+ * data and skip any field that isn't set.
+ */
+export function pdpSpecRows(sku: Sku): SpecRow[] {
+  const s = sku.specs;
+  const rows: SpecRow[] = [{ label: "Scale", value: sku.scale }];
+  const add = (label: string, value: string | number | undefined, unit = "") => {
+    if (value !== undefined && value !== "") rows.push({ label, value: `${value}${unit}` });
+  };
+  add("Length", s.lengthMM, " mm");
+  add("Drive", s.drive);
+  add("Top speed", s.topSpeedKmh, " km/h");
+  add("Battery life", s.batteryMin, " min");
+  add("Charge time", s.chargeMin, " min");
+  add("Range", s.rangeM, " m");
+  add("LED", s.led);
+  add("Drift mode", s.drift);
+  if (sku.specRows) rows.push(...sku.specRows);
+  else rows.push({ label: "Charger", value: "USB-C" });
+  return rows;
+}
 
 export const PRODUCTS: Sku[] = [
   {
@@ -1120,6 +1160,202 @@ export const PRODUCTS: Sku[] = [
     altImages: ["/products/rcai/rc-forklift/default-2.webp", "/products/rcai/rc-forklift/default-3.webp", "/products/rcai/rc-forklift/default-4.webp"],
     specs: { lengthMM: 110, drive: "2WD", topSpeedKmh: 5, batteryMin: 20, chargeMin: 60, rangeM: 16, minAge: 6, led: "Work lamp", drift: "No" },
   },
+  // ---- Sep 2026 intake (photo shoot 2026-09-15) ----------------------------
+  // PRICE_REVIEW_REQUIRED + STOCK_REVIEW_REQUIRED: price and colour stock are 0
+  // until the owner confirms them, so every SKU here stays `comingSoon` (hub
+  // teaser only: no price, no buy, PDP 404). Copy and spec rows state only what
+  // is verified from the product or its remote; model-number specs are added
+  // once the box labels are confirmed. Gallery = 4 images; extra colours get
+  // their own hero and share the primary colour's images 2-4.
+  {
+    id: "mustang-gt500", slug: "mustang-gt500", kind: "RC", scale: "1:10", category: "hobby", comingSoon: true,
+    name: "Mustang GT500", tagline: "1:10 muscle-car RC · twin racing stripes · race wing",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Big 1:10 muscle-coupe body in metallic blue", "Twin white racing stripes, nose to tail", "Fixed rear race wing and front splitter", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:10 muscle coupe",
+    heroImage: "/products/rcai/mustang-gt500/default.webp",
+    altImages: ["/products/rcai/mustang-gt500/default-2.webp", "/products/rcai/mustang-gt500/default-3.webp", "/products/rcai/mustang-gt500/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:10 RC car", "Pistol-grip remote"],
+  },
+  {
+    id: "defender-crawler-16", slug: "defender-crawler-16", kind: "RC", scale: "1:16", category: "hobby", comingSoon: true,
+    name: "Defender Crawler", tagline: "1:16 scale crawler · roof rack · rear spare",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Classic four-door Defender-style wagon body", "Full-length roof rack with front light bar", "Spare wheel on the rear door, tall crawler tyres", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:16 scale crawler",
+    heroImage: "/products/rcai/defender-crawler-16/yellow.webp",
+    altImages: ["/products/rcai/defender-crawler-16/yellow-2.webp", "/products/rcai/defender-crawler-16/yellow-3.webp", "/products/rcai/defender-crawler-16/yellow-4.webp"],
+    colors: [
+      { name: "Yellow", slug: "yellow", swatch: "#d99a1e", stock: 0, image: "/products/rcai/defender-crawler-16/yellow.webp",
+        altImages: ["/products/rcai/defender-crawler-16/yellow-2.webp", "/products/rcai/defender-crawler-16/yellow-3.webp", "/products/rcai/defender-crawler-16/yellow-4.webp"] },
+      { name: "Black", slug: "black", swatch: "#1c1c1c", stock: 0, image: "/products/rcai/defender-crawler-16/black.webp",
+        altImages: ["/products/rcai/defender-crawler-16/yellow-2.webp", "/products/rcai/defender-crawler-16/yellow-3.webp", "/products/rcai/defender-crawler-16/yellow-4.webp"] },
+    ],
+    specs: {},
+    specRows: [{ label: "Colours", value: "Yellow, Black" }, { label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:16 RC crawler", "Pistol-grip remote"],
+  },
+  {
+    id: "ford-pickup-crawler-16", slug: "ford-pickup-crawler-16", kind: "RC", scale: "1:16", category: "hobby", comingSoon: true,
+    name: "Ford Pickup Crawler", tagline: "1:16 scale rock crawler · classic two-tone pickup",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Late-’70s full-size pickup body, blue over white", "Chrome-look grille and bumpers", "Cab-mounted roof light bar, tall crawler tyres", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:16 rock crawler",
+    heroImage: "/products/rcai/ford-pickup-crawler-16/default.webp",
+    altImages: ["/products/rcai/ford-pickup-crawler-16/default-2.webp", "/products/rcai/ford-pickup-crawler-16/default-3.webp", "/products/rcai/ford-pickup-crawler-16/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:16 RC crawler", "Pistol-grip remote"],
+  },
+  {
+    id: "bronco-crawler-16", slug: "bronco-crawler-16", kind: "RC", scale: "1:16", category: "hobby", comingSoon: true,
+    name: "Bronco Crawler", tagline: "1:16 scale crawler · hardtop · tailgate spare",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Modern four-door Bronco-style body in pale blue-grey", "Black hardtop, flares and bumpers", "Roof light bar and tailgate-mounted spare wheel", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:16 scale crawler",
+    heroImage: "/products/rcai/bronco-crawler-16/default.webp",
+    altImages: ["/products/rcai/bronco-crawler-16/default-2.webp", "/products/rcai/bronco-crawler-16/default-3.webp", "/products/rcai/bronco-crawler-16/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:16 RC crawler", "Pistol-grip remote"],
+  },
+  {
+    id: "bronco-desert-racer-18", slug: "bronco-desert-racer-18", kind: "RC", scale: "1:18", category: "hobby", comingSoon: true,
+    name: "Bronco Desert Racer", tagline: "1:18 desert racer · race livery · roll cage",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Two-door Bronco-style desert-racer body", "Red, white and black race livery", "Exposed rear roll cage, red beadlock-style wheels", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:18 desert racer",
+    heroImage: "/products/rcai/bronco-desert-racer-18/default.webp",
+    altImages: ["/products/rcai/bronco-desert-racer-18/default-2.webp", "/products/rcai/bronco-desert-racer-18/default-3.webp", "/products/rcai/bronco-desert-racer-18/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:18 RC truck", "Pistol-grip remote"],
+  },
+  {
+    id: "land-cruiser-pickup-12", slug: "land-cruiser-pickup-12", kind: "RC", scale: "1:12", category: "hobby", comingSoon: true,
+    name: "Land Cruiser Pickup", tagline: "1:12 scale off-roader · canopy · bull bar",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Classic single-cab utility body in silver", "Enclosed black rear canopy with rear spare", "Tubular front bull bar, deep-tread tyres", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:12 scale off-roader",
+    heroImage: "/products/rcai/land-cruiser-pickup-12/default.webp",
+    altImages: ["/products/rcai/land-cruiser-pickup-12/default-2.webp", "/products/rcai/land-cruiser-pickup-12/default-3.webp", "/products/rcai/land-cruiser-pickup-12/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:12 RC truck", "Pistol-grip remote"],
+  },
+  {
+    id: "defender-pickup-12", slug: "defender-pickup-12", kind: "RC", scale: "1:12", category: "hobby", comingSoon: true,
+    name: "Defender Pickup", tagline: "1:12 scale off-roader · snorkel · bed spare",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Short-wheelbase utility pickup body in yellow", "Black cab roof and side snorkel", "Spare wheel standing in the open bed", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:12 scale off-roader",
+    heroImage: "/products/rcai/defender-pickup-12/default.webp",
+    altImages: ["/products/rcai/defender-pickup-12/default-2.webp", "/products/rcai/defender-pickup-12/default-3.webp", "/products/rcai/defender-pickup-12/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:12 RC truck", "Pistol-grip remote"],
+  },
+  {
+    id: "land-cruiser-flatbed-12", slug: "land-cruiser-flatbed-12", kind: "RC", scale: "1:12", category: "hobby", comingSoon: true,
+    name: "Land Cruiser Flatbed", tagline: "1:12 scale work truck · flat tray · hook frame",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Classic single-cab work-truck body in yellow", "Black flat tray bed with rear hook frame", "Tubular front bull bar, deep-tread tyres", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:12 scale work truck",
+    heroImage: "/products/rcai/land-cruiser-flatbed-12/default.webp",
+    altImages: ["/products/rcai/land-cruiser-flatbed-12/default-2.webp", "/products/rcai/land-cruiser-flatbed-12/default-3.webp", "/products/rcai/land-cruiser-flatbed-12/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:12 RC truck", "Pistol-grip remote"],
+  },
+  {
+    id: "polo-wrc-14", slug: "polo-wrc-14", kind: "RC", scale: "1:14", category: "polo", comingSoon: true,
+    name: "Polo WRC", tagline: "1:14 rally-car replica · WRC livery",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Rally hatchback body in navy-to-white WRC livery", "Printed rally graphics and POLO plates", "Rear roof spoiler, multi-spoke wheels", "Pistol-grip remote — trigger throttle, wheel steering"],
+    bodyShape: "1:14 rally car",
+    heroImage: "/products/rcai/polo-wrc-14/default.webp",
+    altImages: ["/products/rcai/polo-wrc-14/default-2.webp", "/products/rcai/polo-wrc-14/default-3.webp", "/products/rcai/polo-wrc-14/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Pistol-grip transmitter" }],
+    inBox: ["1:14 RC car", "Pistol-grip remote"],
+  },
+  {
+    id: "skyline-gtr-43", slug: "skyline-gtr-43", kind: "RC", scale: "1:43", category: "s43", comingSoon: true,
+    name: "Skyline GT-R", tagline: "1:43 palm-sized RC · 2.4GHz · ESP",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Palm-sized 1:43 GT-R body in silver with blue graphics", "2.4GHz pistol-grip remote", "ESP and light buttons on the remote", "Steering trim on the remote"],
+    bodyShape: "1:43 sports coupe",
+    heroImage: "/products/rcai/skyline-gtr-43/default.webp",
+    altImages: ["/products/rcai/skyline-gtr-43/default-2.webp", "/products/rcai/skyline-gtr-43/default-3.webp", "/products/rcai/skyline-gtr-43/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "2.4GHz pistol-grip" }, { label: "Remote controls", value: "ESP, Light, Steering trim, On/Off" }],
+    inBox: ["1:43 RC car", "2.4GHz pistol-grip remote"],
+  },
+  {
+    id: "porsche-911-rsr-43", slug: "porsche-911-rsr-43", kind: "RC", scale: "1:43", category: "s43", comingSoon: true,
+    name: "Porsche 911 RSR", tagline: "1:43 palm-sized RC · 2.4GHz · ESP",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Palm-sized 1:43 race-car body in white race livery", "Rear race wing on swan-neck mounts", "2.4GHz pistol-grip remote with ESP and light buttons", "Steering trim on the remote"],
+    bodyShape: "1:43 race car",
+    heroImage: "/products/rcai/porsche-911-rsr-43/default.webp",
+    altImages: ["/products/rcai/porsche-911-rsr-43/default-2.webp", "/products/rcai/porsche-911-rsr-43/default-3.webp", "/products/rcai/porsche-911-rsr-43/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "2.4GHz pistol-grip" }, { label: "Remote controls", value: "ESP, Light, Steering trim, On/Off" }],
+    inBox: ["1:43 RC car", "2.4GHz pistol-grip remote"],
+  },
+  {
+    id: "cement-mixer-truck-18", slug: "cement-mixer-truck-18", kind: "RC", scale: "1:18", category: "construction", comingSoon: true,
+    name: "Cement Mixer Truck", tagline: "1:18 RC construction · three-axle mixer",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Three-axle concrete-mixer body with white cab", "Black drum with green spiral and green chute", "Six-wheel truck chassis", "Twin-stick gamepad remote"],
+    bodyShape: "1:18 mixer truck",
+    heroImage: "/products/rcai/cement-mixer-truck-18/default.webp",
+    altImages: ["/products/rcai/cement-mixer-truck-18/default-2.webp", "/products/rcai/cement-mixer-truck-18/default-3.webp", "/products/rcai/cement-mixer-truck-18/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Twin-stick gamepad" }],
+    inBox: ["1:18 RC mixer truck", "Gamepad remote"],
+  },
+  {
+    id: "lowbed-trailer-truck-18", slug: "lowbed-trailer-truck-18", kind: "RC", scale: "1:18", category: "construction", comingSoon: true,
+    name: "Low-Bed Trailer Truck", tagline: "1:18 RC heavy haulage · tractor + low-bed trailer",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Grey three-axle tractor unit with roof beacons", "Long low-bed trailer with two folding ramps", "Tractor and trailer supplied as one set", "Twin-stick gamepad remote"],
+    bodyShape: "1:18 tractor and low-bed trailer",
+    heroImage: "/products/rcai/lowbed-trailer-truck-18/default.webp",
+    altImages: ["/products/rcai/lowbed-trailer-truck-18/default-2.webp", "/products/rcai/lowbed-trailer-truck-18/default-3.webp", "/products/rcai/lowbed-trailer-truck-18/default-4.webp"],
+    specs: {},
+    specRows: [{ label: "Remote", value: "Twin-stick gamepad" }],
+    inBox: ["1:18 RC tractor unit", "Low-bed trailer", "Gamepad remote"],
+  },
+  {
+    id: "kids-electric-dirt-bike", slug: "kids-electric-dirt-bike", kind: "Ride-on", scale: "Ride-on", category: "bike", comingSoon: true,
+    name: "Kids Electric Dirt Bike", tagline: "Kids' electric mini dirt bike · 4 colours",
+    retailINR: 0, mrpINR: 0, badge: "NEW",
+    bullets: ["Motocross-style electric dirt bike sized for kids", "Coil-spring rear shock and hand-lever disc brake", "Digital display on the handlebars", "Knobby off-road tyres and side kickstand"],
+    bodyShape: "Kids' electric dirt bike",
+    heroImage: "/products/rcai/kids-electric-dirt-bike/green.webp",
+    altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"],
+    colors: [
+      { name: "Green", slug: "green", swatch: "#7cc91e", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/green.webp",
+        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
+      { name: "Red", slug: "red", swatch: "#dc2626", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/red.webp",
+        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
+      { name: "Yellow", slug: "yellow", swatch: "#facc15", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/yellow.webp",
+        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
+      { name: "Blue", slug: "blue", swatch: "#1d4ed8", stock: 0, image: "/products/rcai/kids-electric-dirt-bike/blue.webp",
+        altImages: ["/products/rcai/kids-electric-dirt-bike/green-2.webp", "/products/rcai/kids-electric-dirt-bike/green-3.webp", "/products/rcai/kids-electric-dirt-bike/green-4.webp"] },
+    ],
+    specs: {},
+    specRows: [
+      { label: "Brakes", value: "Hand-lever disc brake" },
+      { label: "Suspension", value: "Coil-spring rear shock" },
+      { label: "Display", value: "Handlebar digital display" },
+      { label: "Colours", value: "Green, Red, Yellow, Blue" },
+    ],
+    inBox: ["Kids' electric dirt bike"],
+  },
   {
     id: "qa-1rs",
     slug: "qa-1rs",
@@ -1205,7 +1441,7 @@ export function getStore16Skus(): Sku[] {
     return i === -1 ? STORE16_ORDER.length : i;
   };
   return PRODUCTS.filter(
-    (p) => p.scale === "1:16" && !p.hidden && !p.internal && !p.comingSoon
+    (p) => p.scale === "1:16" && p.category !== "hobby" && !p.hidden && !p.internal && !p.comingSoon
   ).sort((a, b) => rank(a.id) - rank(b.id));
 }
 
@@ -1225,8 +1461,23 @@ export function getHubMiniSkus(): Sku[] {
 /** Hub "Big Drift · 1:16" tile — the live 1:16 lineup + any 1:16 teasers. */
 export function getHubBig16Skus(): Sku[] {
   return PRODUCTS.filter(
-    (p) => p.scale === "1:16" && !p.hidden && !p.internal
+    (p) => p.scale === "1:16" && p.category !== "hobby" && !p.hidden && !p.internal
   ).sort(bySoon);
+}
+
+/** Hub "1:43 Scale" tile. */
+export function getHub43Skus(): Sku[] {
+  return PRODUCTS.filter((p) => p.category === "s43" && !p.hidden && !p.internal).sort(bySoon);
+}
+
+/** Hub "Hobby Grade" tile — big-scale crawlers, trucks and racers. */
+export function getHubHobbySkus(): Sku[] {
+  return PRODUCTS.filter((p) => p.category === "hobby" && !p.hidden && !p.internal).sort(bySoon);
+}
+
+/** Hub "Kids E-Bikes" tile — children's electric ride-ons. */
+export function getHubBikeSkus(): Sku[] {
+  return PRODUCTS.filter((p) => p.category === "bike" && !p.hidden && !p.internal).sort(bySoon);
 }
 
 /** Hub "1:20 Scale" tile — 1:20 products, minus those pulled into their own

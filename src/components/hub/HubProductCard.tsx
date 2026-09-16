@@ -103,7 +103,8 @@ function driftChip(raw: string): { label: string; drifts: boolean } | null {
 /** Image chip: what kind of RC this is, derived from `specs` — never asserted. */
 function kindChip(sku: Sku): string {
   if (sku.category === "construction") return "RC WORK";
-  const drift = driftChip(sku.specs.drift);
+  if (sku.category === "bike") return "RIDE-ON";
+  const drift = driftChip(sku.specs.drift ?? "");
   if (drift?.drifts) return "RC DRIFT";
   const label = drift?.label.toLowerCase() ?? "";
   if (label.includes("off-road") || label.includes("all-terrain")) return "RC OFF-ROAD";
