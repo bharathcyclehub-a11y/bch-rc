@@ -24,9 +24,9 @@ export const HUB_CATEGORIES: HubCat[] = [
   { key: "s20", label: "1:20 Scale", img: "/landing/cat-s20.webp", skus: getHub20Skus() },
   { key: "construction", label: "Construction", img: "/landing/cat-construction.webp", skus: getHubConstructionSkus() },
   { key: "polo", label: "Polo", img: "/landing/cat-polo.webp", skus: getHubPoloSkus() },
-  { key: "s43", label: "1:43 Scale", img: null, skus: getHub43Skus() },
+  { key: "s43", label: "1:43 Scale", img: "/landing/cat-s43.jpg", skus: getHub43Skus() },
   { key: "drone", label: "Drone", img: "/landing/cat-drone.webp", skus: [] },
-  { key: "hobby", label: "Hobby Grade", img: null, skus: getHubHobbySkus() },];
+  { key: "hobby", label: "Hobby Grade", img: "/landing/cat-hobby.jpg", skus: getHubHobbySkus() },];
 
 export function getHubCategory(key: string): HubCat | undefined {
   return HUB_CATEGORIES.find((c) => c.key === key);
