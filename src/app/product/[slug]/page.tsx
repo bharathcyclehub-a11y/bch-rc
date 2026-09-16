@@ -122,7 +122,10 @@ export async function generateMetadata({
 }) {
   const { slug } = await params;
   const sku = PRODUCTS.find((p) => p.slug === slug);
-  if (!sku) return { title: "Not Found" };
+  if (!sku || sku.hidden || sku.internal) return { title: "Not Found" };
+  // Coming-soon SKUs are public hub teasers without a price yet: keep the name,
+  // never a placeholder price. (No DB lookup here — metadata stays query-free.)
+  if (sku.comingSoon) return { title: sku.name };
 
   const url = `/product/${sku.slug}`;
   const fullDescription =

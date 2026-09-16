@@ -20,7 +20,9 @@ import { HubProductCard } from "@/components/hub/HubProductCard";
 function TileImage({ c }: { c: HubCat }) {
   if (c.img) {
     return (
-      <Image src={c.img} alt={c.label} width={1254} height={1254} sizes="150px" className="h-full w-full object-cover" />
+      // Tiles render at ~22vw on phones and 96px from sm up — size the request
+      // to that, not 150px, so 2x screens get a 256px variant instead of 384px.
+      <Image src={c.img} alt={c.label} width={512} height={512} sizes="(min-width: 640px) 96px, 22vw" className="h-full w-full object-cover" />
     );
   }
   return (

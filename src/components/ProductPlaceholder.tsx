@@ -30,7 +30,11 @@ const SCALE_GRADIENTS: Record<Sku["scale"], string> = {
   "1:43": "from-red-100 via-rose-50 to-orange-100",
   "1:24": "from-slate-100 via-zinc-100 to-neutral-200",
   "1:20": "from-sky-100 via-blue-50 to-indigo-100",
+  "1:18": "from-zinc-100 via-neutral-50 to-stone-100",
   "1:16": "from-zinc-100 via-neutral-50 to-stone-100",
+  "1:14": "from-zinc-100 via-neutral-50 to-stone-100",
+  "1:12": "from-zinc-100 via-neutral-50 to-stone-100",
+  "1:10": "from-zinc-100 via-neutral-50 to-stone-100",
 };
 
 const SCALE_ACCENT: Record<Sku["scale"], string> = {
@@ -38,7 +42,11 @@ const SCALE_ACCENT: Record<Sku["scale"], string> = {
   "1:43": "text-brand-red",
   "1:24": "text-slate-500",
   "1:20": "text-sky-500",
+  "1:18": "text-brand-red",
   "1:16": "text-brand-red",
+  "1:14": "text-brand-red",
+  "1:12": "text-brand-red",
+  "1:10": "text-brand-red",
 };
 
 export function ProductPlaceholder({
