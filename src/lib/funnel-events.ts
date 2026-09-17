@@ -84,6 +84,20 @@ export const MAX_FUNNEL_BATCH = 30;
 export const MAX_FUNNEL_BODY_BYTES = 48 * 1024;
 
 /** Client event/session IDs must use the same UUID format as the database. */
+/**
+ * v4 UUID that also works on plain-HTTP pages. `crypto.randomUUID` exists only
+ * in secure contexts (HTTPS / localhost); `crypto.getRandomValues` exists in
+ * all of them, so the fallback stays a real UUID that passes isTrackingUuid.
+ */
+export function newTrackingUuid(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 export function isTrackingUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }

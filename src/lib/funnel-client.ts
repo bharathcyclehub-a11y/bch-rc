@@ -9,7 +9,7 @@
  * data Syed needs: of N visitors, how many reach each step and where they stop.
  */
 
-import { cleanFunnelMetadata, cleanTrackingPath, MAX_FUNNEL_BATCH, MAX_FUNNEL_BODY_BYTES, type FunnelEventType } from "@/lib/funnel-events";
+import { cleanFunnelMetadata, cleanTrackingPath, MAX_FUNNEL_BATCH, MAX_FUNNEL_BODY_BYTES, newTrackingUuid, type FunnelEventType } from "@/lib/funnel-events";
 import { shouldTrackPath } from "@/lib/analytics";
 
 type Buffered = {
@@ -74,7 +74,7 @@ export function trackFunnel(
   const path = cleanTrackingPath(opts?.path ?? window.location.pathname);
   if (!path || !shouldTrackPath(path)) return;
   buffer.push({
-    eventId: crypto.randomUUID(),
+    eventId: newTrackingUuid(),
     type,
     path,
     metadata: cleanFunnelMetadata(metadata),
