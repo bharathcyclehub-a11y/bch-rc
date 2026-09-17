@@ -1,6 +1,48 @@
 import type { NextConfig } from "next";
 
+/**
+ * VPS build (`NEXT_OUTPUT=standalone`, set by .github/workflows/deploy-vps.yml).
+ * On Vercel these stay off: vercel.json already supplies the redirects and
+ * security headers there, so Vercel's output is unchanged. A VPS has no
+ * vercel.json, so the same rules are applied here instead — keep both in sync.
+ */
+const isVps = process.env.NEXT_OUTPUT === "standalone";
+
+const VPS_REDIRECTS = [
+  { source: "/products", destination: "/#sku", permanent: true },
+  { source: "/products/", destination: "/#sku", permanent: true },
+  { source: "/shop", destination: "/#sku", permanent: true },
+  { source: "/collection", destination: "/#sku", permanent: true },
+  { source: "/collections", destination: "/#sku", permanent: true },
+  { source: "/cart", destination: "/?openCart=1", permanent: false },
+];
+
+const VPS_HEADERS = [
+  {
+    source: "/(.*)",
+    headers: [
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "X-Frame-Options", value: "SAMEORIGIN" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(self), interest-cohort=()" },
+      { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+    ],
+  },
+  {
+    source: "/(robots.txt|sitemap.xml)",
+    headers: [{ key: "Cache-Control", value: "public, max-age=3600, s-maxage=86400" }],
+  },
+  {
+    source: "/ugc/(.*)",
+    headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+  },
+];
+
 const nextConfig: NextConfig = {
+  ...(isVps ? { output: "standalone" as const } : {}),
+  async redirects() {
+    return isVps ? VPS_REDIRECTS : [];
+  },
   images: {
     // DEV-ONLY: bypass the image optimizer locally. The Next 16 + Turbopack dev
     // optimizer was failing to render optimized images on this machine (blank
@@ -52,6 +94,7 @@ const nextConfig: NextConfig = {
     // correct trade — we change them rarely and we want them sticky.
     const immutableYear = "public, max-age=31536000, immutable";
     return [
+      ...(isVps ? VPS_HEADERS : []),
       {
         source: "/og-image.jpg",
         headers: [{ key: "Cache-Control", value: immutableYear }],

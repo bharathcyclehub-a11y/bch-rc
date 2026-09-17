@@ -1,0 +1,127 @@
+# Build on GitHub, ship ONLY the build output (standalone Next.js bundle —
+# no source, no npm install, no build on the server) to the VPS over SSH with
+# username + password, switch releases atomically, health-check, roll back
+# on failure.
+#
+# Setup: deploy/vps/README.md. Nothing runs until the repo variable
+# VPS_DEPLOY_ENABLED is set to "true", so merging this file is inert.
+
+name: Deploy to VPS
+
+# Manual only: Actions → Deploy to VPS → Run workflow.
+on:
+  workflow_dispatch:
+
+# One deploy at a time; a second run waits rather than racing the release swap.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: vars.VPS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # next build needs the NEXT_PUBLIC_* values (inlined into the client) and
+      # the database (product pages prerender from it), so the full env file is
+      # present at build time. It is deleted before the bundle is packed.
+      - name: Write build env
+        # VERCEL / VERCEL_* lines (from `vercel env pull`) are dropped so the build
+        # does not think it is running on Vercel.
+        run: printf '%s\n' "$PRODUCTION_ENV" | grep -vE '^(export +)?VERCEL(_[A-Z0-9_]*)?=' > .env.production
+        env:
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_OUTPUT: standalone
+          NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Assemble bundle
+        run: |
+          set -euo pipefail
+          B=.next/standalone
+          cp -r public "$B/public"
+          mkdir -p "$B/.next"
+          cp -r .next/static "$B/.next/static"
+          cp deploy/vps/ecosystem.config.cjs deploy/vps/cron.sh "$B/"
+          # Secrets live only in shared/.env on the server, never in a release.
+          find "$B" -maxdepth 1 -name '.env*' -delete
+          rm -f .env.production
+          echo "$GITHUB_SHA" > "$B/REVISION"
+          tar -czf release.tgz -C "$B" .
+          ls -lh release.tgz
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass >/dev/null
+          install -m 700 -d ~/.ssh
+          PORT="${VPS_PORT:-22}"
+          if [ -n "$VPS_KNOWN_HOSTS" ]; then
+            # Pinned host key: the password is never sent to an impostor server.
+            printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_KNOWN_HOSTS not set — trusting the host key scanned now. Set it to pin the server."
+            ssh-keyscan -p "$PORT" -H "$VPS_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host vps
+            HostName $VPS_HOST
+            User $VPS_USER
+            Port $PORT
+            PreferredAuthentications password,keyboard-interactive
+            PubkeyAuthentication no
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+
+      # sshpass -e reads the password from $SSHPASS, so it never appears in a
+      # command line or process list. It is scoped to the steps that SSH only.
+      - name: Upload build and env
+        run: |
+          set -euo pipefail
+          [ -n "$APP_DIR" ] || { echo "::error::secret VPS_DEPLOY_PATH is not set"; exit 1; }
+          sshpass -e ssh vps "mkdir -p '$APP_DIR/incoming' '$APP_DIR/shared' && chmod 700 '$APP_DIR/shared'"
+          sshpass -e scp -q release.tgz deploy/vps/remote-deploy.sh "vps:$APP_DIR/incoming/"
+          # Refresh the runtime env from the same secret the build used.
+          printf '%s\n' "$PRODUCTION_ENV" | grep -vE '^(export +)?VERCEL(_[A-Z0-9_]*)?=' \
+            | sshpass -e ssh vps "umask 077 && cat > '$APP_DIR/shared/.env'"
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+          APP_DIR: ${{ secrets.VPS_DEPLOY_PATH }}
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+
+      - name: Activate release
+        run: |
+          sshpass -e ssh vps "APP_DIR='$APP_DIR' APP_PORT='$APP_PORT' INSTALL_CRONS='$INSTALL_CRONS' \
+            bash '$APP_DIR/incoming/remote-deploy.sh' '$GITHUB_SHA'"
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+          APP_DIR: ${{ secrets.VPS_DEPLOY_PATH }}
+          APP_PORT: ${{ vars.VPS_APP_PORT || '3000' }}
+          INSTALL_CRONS: ${{ vars.VPS_INSTALL_CRONS || 'false' }}
