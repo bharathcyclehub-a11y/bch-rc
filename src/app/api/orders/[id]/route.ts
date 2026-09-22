@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
-import { resolveServiceability } from "@/lib/serviceability";
+import { orderEtaText } from "@/lib/serviceability";
 import { rateLimit } from "@/lib/rate-limit";
 
 export async function GET(
@@ -41,9 +41,7 @@ export async function GET(
 
   // Delivery expectation — only meaningful before it's actually delivered.
   const etaText =
-    addr?.pincode && order.status !== "DELIVERED"
-      ? resolveServiceability(addr.pincode).etaText || null
-      : null;
+    order.status !== "DELIVERED" ? orderEtaText(addr?.pincode, order) : null;
 
   return NextResponse.json({
     id: order.id,

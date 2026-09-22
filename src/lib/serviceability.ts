@@ -74,6 +74,7 @@ function deliveryDate(fromDays: number, now: Date): string {
   const dt = new Date(now);
   dt.setDate(dt.getDate() + fromDays);
   return dt.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -195,4 +196,27 @@ export async function verifyServiceabilityLive(
       ? null
       : "COD isn't available for this pincode — pay online to order (you save ₹100).",
   };
+}
+
+/** Shown instead of a date once an order's estimated window has passed. */
+export const ETA_LATE_TEXT = "running a little late — we'll update you shortly";
+
+/**
+ * Delivery estimate for an EXISTING order. Anchored to a fixed moment (ship
+ * date once shipped, else payment/placement) so the date doesn't slide forward
+ * every time the buyer reloads the page. Once that window has passed without
+ * delivery, returns ETA_LATE_TEXT rather than a date in the past.
+ */
+export function orderEtaText(
+  pincode: string | undefined,
+  order: { placedAt: Date; paidAt: Date | null; shippedAt: Date | null },
+  now: Date = new Date(),
+): string | null {
+  if (!pincode) return null;
+  const anchor = new Date(order.shippedAt ?? order.paidAt ?? order.placedAt);
+  const s = resolveServiceability(pincode, anchor);
+  if (!s.serviceable) return null;
+  const windowEnd = new Date(anchor);
+  windowEnd.setDate(windowEnd.getDate() + s.etaMaxDays + 1); // through the whole last day
+  return now > windowEnd ? ETA_LATE_TEXT : s.etaText;
 }

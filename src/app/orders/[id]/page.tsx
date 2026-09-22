@@ -16,7 +16,7 @@ import { WhatsAppIcon } from "@/components/BrandIcons";
 import { THEME } from "@/lib/theme";
 import { waLink, OFFERS, bundleDiscountInr, bundleTierLabel } from "@/lib/config";
 import { formatINR, formatIST } from "@/lib/utils";
-import { resolveServiceability } from "@/lib/serviceability";
+import { orderEtaText } from "@/lib/serviceability";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
 
@@ -64,9 +64,7 @@ export default async function OrderSuccessPage({
   const maskedPhone = shippingAddr?.phone
     ? `••••• ${String(shippingAddr.phone).slice(-4)}`
     : null;
-  const etaText = shippingAddr?.pincode
-    ? resolveServiceability(shippingAddr.pincode).etaText
-    : null;
+  const etaText = orderEtaText(shippingAddr?.pincode, order);
   const paidAtText = order.paidAt
     ? formatIST(order.paidAt, {
         day: "numeric",
