@@ -42,8 +42,8 @@ const STEPS: Step[] = [
   },
   {
     key: "shipped",
-    label: "Out for delivery",
-    sub: "Shiprocket courier en route",
+    label: "Shipped",
+    sub: "Handed to the courier — on its way",
     icon: Truck,
   },
   {
