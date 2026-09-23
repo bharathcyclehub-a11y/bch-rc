@@ -29,20 +29,27 @@ export function ProductImage({
   sku,
   className,
   active,
+  src: srcOverride,
 }: {
   sku: Sku;
   className?: string;
   /** When provided, the parent controls hover (whole-card trigger). When
    *  undefined, the image manages its own hover. */
   active?: boolean;
+  /** Show a specific image instead of the SKU hero — used by cards with a
+   *  colour picker so the card follows the selected swatch. */
+  src?: string;
 }) {
-  const [failed, setFailed] = useState(false);
+  // Remember WHICH src failed, so switching colour re-tries rather than
+  // leaving the placeholder up for every later image.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const controlled = active !== undefined;
+  const src = srcOverride ?? sku.heroImage;
   // Zepto-style blur-up: tiny base64 preview shows instantly, real image fades
   // in over it. Map is generated at build time (scripts/gen-blur.ts).
-  const blur = (blurMap as Record<string, string>)[sku.heroImage];
+  const blur = (blurMap as Record<string, string>)[src];
 
   const startVideo = useCallback(() => {
     if (!sku.heroVideo || !videoRef.current) return;
@@ -66,7 +73,7 @@ export function ProductImage({
     else stopVideo();
   }, [controlled, active, startVideo, stopVideo]);
 
-  if (!sku.heroImage || failed) {
+  if (!src || failedSrc === src) {
     return (
       <ProductPlaceholder sku={sku} showLabel={false} className={className} />
     );
@@ -94,7 +101,7 @@ export function ProductImage({
           `onError` fallback above still swaps to the ProductPlaceholder
           if the image fails to load entirely. */}
       <Image
-        src={sku.heroImage}
+        src={src}
         alt={sku.name}
         fill
         sizes="(max-width: 768px) 50vw, (max-width: 1280px) 50vw, 25vw"
@@ -104,7 +111,7 @@ export function ProductImage({
         className={`object-contain object-center transition-opacity duration-300 ${
           playing ? "opacity-0" : "opacity-100"
         }`}
-        onError={() => setFailed(true)}
+        onError={() => setFailedSrc(src)}
       />
 
       {/* Hover video — preloads metadata so first hover plays cleanly.
@@ -115,7 +122,7 @@ export function ProductImage({
         <video
           ref={videoRef}
           src={sku.heroVideo}
-          poster={sku.heroImage}
+          poster={src}
           muted
           loop
           playsInline
