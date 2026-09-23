@@ -226,7 +226,8 @@ export function HubProductCard({
       {(() => {
         const overlay = (
           <>
-            <ProductImage sku={sku} active={hovered} />
+            {/* Follows the swatch: picking a colour swaps the card image. */}
+            <ProductImage sku={sku} active={hovered} src={selectedColor?.image ?? undefined} />
 
             {/* Left rail: what it IS (derived), then the rank badge. */}
             <span className="absolute left-2 top-2 z-10 flex flex-col items-start gap-1 sm:left-3 sm:top-3">

@@ -23,15 +23,16 @@ import { sendEmail } from "./send-email";
 import { sendWhatsApp } from "./send-whatsapp";
 import { whatsappEnabled } from "./notify";
 import { logError } from "@/lib/logger";
+import { envStr, sanitizeEnvValue } from "@/lib/env";
 
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ||
   "https://pocketrccars.com";
 
 function recipients(envKey: string): string[] {
-  return (process.env[envKey] ?? "")
+  return envStr(envKey)
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => sanitizeEnvValue(s))
     .filter(Boolean);
 }
 
