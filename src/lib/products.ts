@@ -1133,6 +1133,9 @@ export const PRODUCTS: Sku[] = [
     bullets: ["Heavy-duty mining haul body", "2.4 GHz full-function control", "USB-C rechargeable", "7-day replacement"],
     badge: "NEW",
     bodyShape: "Mining haul truck",
+    // The shared default list describes the 1:64 drift cars (drift wheels etc.),
+    // which is wrong for a construction toy.
+    inBox: ["1:64 RC mining truck (assembled)", "2.4 GHz gamepad remote", "USB-C charging cable", "Gift-ready box"],
     heroImage: "/products/rcai/mining-truck/default.webp",
     altImages: ["/products/rcai/mining-truck/default-2.webp", "/products/rcai/mining-truck/default-3.webp", "/products/rcai/mining-truck/default-4.webp"],
     // Sep 2026 colour shoot — see the excavator note above.
@@ -1155,6 +1158,7 @@ export const PRODUCTS: Sku[] = [
     bullets: ["Excavator with articulating arm", "2.4 GHz full-function control", "USB-C rechargeable", "7-day replacement"],
     badge: "NEW",
     bodyShape: "Tracked excavator",
+    inBox: ["1:64 RC excavator (assembled)", "2.4 GHz gamepad remote", "USB-C charging cable", "Gift-ready box"],
     heroImage: "/products/rcai/rc-excavator/default.webp",
     altImages: ["/products/rcai/rc-excavator/default-2.webp", "/products/rcai/rc-excavator/default-3.webp", "/products/rcai/rc-excavator/default-4.webp"],
     // Sep 2026 colour shoot. Yellow carries the original stock; the new colours
@@ -1182,6 +1186,7 @@ export const PRODUCTS: Sku[] = [
     bullets: ["Forklift with working lift mast", "2.4 GHz full-function control", "USB-C rechargeable", "7-day replacement"],
     badge: "NEW",
     bodyShape: "Warehouse forklift",
+    inBox: ["1:64 RC forklift (assembled)", "2.4 GHz gamepad remote", "USB-C charging cable", "Gift-ready box"],
     heroImage: "/products/rcai/rc-forklift/default.webp",
     altImages: ["/products/rcai/rc-forklift/default-2.webp", "/products/rcai/rc-forklift/default-3.webp", "/products/rcai/rc-forklift/default-4.webp"],
     // Sep 2026 colour shoot — see the excavator note above.
