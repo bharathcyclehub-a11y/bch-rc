@@ -26,6 +26,7 @@ import { db } from "@/db";
 import { notificationsOutbox, events } from "@/db/schema";
 import { alertOpsEmailBounce } from "@/lib/notifications/notify-seller";
 import { logError } from "@/lib/logger";
+import { envStr } from "@/lib/env";
 
 const STATUS_MAP: Record<string, string> = {
   "email.sent": "sent",
@@ -76,7 +77,7 @@ function verifySvix(
 
 export async function POST(req: Request) {
   const rawBody = await req.text();
-  const secret = process.env.RESEND_WEBHOOK_SECRET;
+  const secret = envStr("RESEND_WEBHOOK_SECRET");
 
   if (!secret) {
     // Not configured yet — accept-and-ignore so Resend's setup test passes,
