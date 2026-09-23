@@ -17,6 +17,8 @@ const HOST = "https://generativelanguage.googleapis.com/v1beta";
 
 /** Image model resolved from the live model list (see `listImageModels`). */
 export const IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-3-pro-image";
+/** Default output size; the cheaper flash image models may only do 1K. */
+export const IMAGE_SIZE = process.env.GEMINI_IMAGE_SIZE ?? "2K";
 
 function requireKey() {
   if (!KEY) throw new Error("GEMINI_API_KEY is not set. Add it to .env.local and run node with --env-file=.env.local.");
@@ -55,7 +57,7 @@ export async function generateImage({
   refs = [],
   model = IMAGE_MODEL,
   aspectRatio = "1:1",
-  imageSize = "2K",
+  imageSize = IMAGE_SIZE,
   refMaxPx = 864,
 }) {
   const parts = [];
@@ -75,11 +77,21 @@ export async function generateImage({
   };
 
   const payload = JSON.stringify(body);
+  // Flash image models reject imageConfig sizes the Pro model accepts; drop the
+  // block and let the model use its native size rather than failing the shot.
+  const fallbackPayload = JSON.stringify({
+    ...body,
+    generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+  });
   const attempts = 4;
   for (let attempt = 1; ; attempt++) {
     try {
       return await callOnce(model, payload);
     } catch (err) {
+      if (/imageConfig|image_config|imageSize|image_size|aspect/i.test(String(err.message)) && err.retryable === false) {
+        console.warn("  imageConfig rejected — retrying at the model's native size");
+        return await callOnce(model, fallbackPayload);
+      }
       // Rate limits, overloads and empty candidates are transient; bad requests are not.
       const retryable = err.retryable !== false;
       if (!retryable || attempt >= attempts) throw err;
@@ -116,5 +128,9 @@ async function callOnce(model, payload) {
     );
   }
   const inline = img.inlineData ?? img.inline_data;
-  return { buffer: Buffer.from(inline.data, "base64"), mime: inline.mimeType ?? inline.mime_type, text };
+  const u = json.usageMetadata ?? {};
+  console.log(
+    `  usage: prompt ${u.promptTokenCount ?? "?"} + output ${u.candidatesTokenCount ?? "?"} = ${u.totalTokenCount ?? "?"} tokens (${model})`,
+  );
+  return { buffer: Buffer.from(inline.data, "base64"), mime: inline.mimeType ?? inline.mime_type, text, usage: u };
 }

@@ -1135,6 +1135,17 @@ export const PRODUCTS: Sku[] = [
     bodyShape: "Mining haul truck",
     heroImage: "/products/rcai/mining-truck/default.webp",
     altImages: ["/products/rcai/mining-truck/default-2.webp", "/products/rcai/mining-truck/default-3.webp", "/products/rcai/mining-truck/default-4.webp"],
+    // Sep 2026 colour shoot — see the excavator note above.
+    colors: [
+      { name: "Yellow", slug: "yellow", swatch: "#f4b41a", stock: 10, image: "/products/rcai/mining-truck/default.webp",
+        altImages: ["/products/rcai/mining-truck/default-2.webp", "/products/rcai/mining-truck/default-3.webp", "/products/rcai/mining-truck/default-4.webp"] },
+      { name: "Blue", slug: "blue", swatch: "#29a3d9", stock: 0, image: "/products/rcai/mining-truck/blue.webp",
+        altImages: ["/products/rcai/mining-truck/blue-2.webp", "/products/rcai/mining-truck/blue-3.webp", "/products/rcai/mining-truck/blue-4.webp"] },
+      { name: "Green", slug: "green", swatch: "#8bc11f", stock: 0, image: "/products/rcai/mining-truck/green.webp",
+        altImages: ["/products/rcai/mining-truck/green-2.webp", "/products/rcai/mining-truck/green-3.webp", "/products/rcai/mining-truck/green-4.webp"] },
+      { name: "Red", slug: "red", swatch: "#d32f2f", stock: 0, image: "/products/rcai/mining-truck/red.webp",
+        altImages: ["/products/rcai/mining-truck/red-2.webp", "/products/rcai/mining-truck/red-3.webp", "/products/rcai/mining-truck/red-4.webp"] },
+    ],
     specs: { lengthMM: 120, drive: "4WD", topSpeedKmh: 8, batteryMin: 20, chargeMin: 60, rangeM: 20, minAge: 6, led: "Work lamp", drift: "No" },
   },
   {
@@ -1146,6 +1157,22 @@ export const PRODUCTS: Sku[] = [
     bodyShape: "Tracked excavator",
     heroImage: "/products/rcai/rc-excavator/default.webp",
     altImages: ["/products/rcai/rc-excavator/default-2.webp", "/products/rcai/rc-excavator/default-3.webp", "/products/rcai/rc-excavator/default-4.webp"],
+    // Sep 2026 colour shoot. Yellow carries the original stock; the new colours
+    // are 0 until the owner confirms counts (STOCK_REVIEW_REQUIRED).
+    colors: [
+      { name: "Yellow", slug: "yellow", swatch: "#f4b41a", stock: 10, image: "/products/rcai/rc-excavator/default.webp",
+        altImages: ["/products/rcai/rc-excavator/default-2.webp", "/products/rcai/rc-excavator/default-3.webp", "/products/rcai/rc-excavator/default-4.webp"] },
+      { name: "Sky Blue", slug: "sky-blue", swatch: "#4fc3e8", stock: 0, image: "/products/rcai/rc-excavator/sky-blue.webp",
+        altImages: ["/products/rcai/rc-excavator/sky-blue-2.webp", "/products/rcai/rc-excavator/sky-blue-3.webp", "/products/rcai/rc-excavator/sky-blue-4.webp"] },
+      { name: "Dark Blue", slug: "dark-blue", swatch: "#1f47c4", stock: 0, image: "/products/rcai/rc-excavator/dark-blue.webp",
+        altImages: ["/products/rcai/rc-excavator/dark-blue-2.webp", "/products/rcai/rc-excavator/dark-blue-3.webp", "/products/rcai/rc-excavator/dark-blue-4.webp"] },
+      { name: "Green", slug: "green", swatch: "#8bc11f", stock: 0, image: "/products/rcai/rc-excavator/green.webp",
+        altImages: ["/products/rcai/rc-excavator/green-2.webp", "/products/rcai/rc-excavator/green-3.webp", "/products/rcai/rc-excavator/green-4.webp"] },
+      { name: "Orange", slug: "orange", swatch: "#f4511e", stock: 0, image: "/products/rcai/rc-excavator/orange.webp",
+        altImages: ["/products/rcai/rc-excavator/orange-2.webp", "/products/rcai/rc-excavator/orange-3.webp", "/products/rcai/rc-excavator/orange-4.webp"] },
+      { name: "Pink", slug: "pink", swatch: "#f48fb1", stock: 0, image: "/products/rcai/rc-excavator/pink.webp",
+        altImages: ["/products/rcai/rc-excavator/pink-2.webp", "/products/rcai/rc-excavator/pink-3.webp", "/products/rcai/rc-excavator/pink-4.webp"] },
+    ],
     specs: { lengthMM: 120, drive: "2WD", topSpeedKmh: 5, batteryMin: 20, chargeMin: 60, rangeM: 18, minAge: 6, led: "Work lamp", drift: "No" },
   },
   {
@@ -1157,6 +1184,17 @@ export const PRODUCTS: Sku[] = [
     bodyShape: "Warehouse forklift",
     heroImage: "/products/rcai/rc-forklift/default.webp",
     altImages: ["/products/rcai/rc-forklift/default-2.webp", "/products/rcai/rc-forklift/default-3.webp", "/products/rcai/rc-forklift/default-4.webp"],
+    // Sep 2026 colour shoot — see the excavator note above.
+    colors: [
+      { name: "Yellow", slug: "yellow", swatch: "#f4b41a", stock: 10, image: "/products/rcai/rc-forklift/default.webp",
+        altImages: ["/products/rcai/rc-forklift/default-2.webp", "/products/rcai/rc-forklift/default-3.webp", "/products/rcai/rc-forklift/default-4.webp"] },
+      { name: "Blue", slug: "blue", swatch: "#29a3d9", stock: 0, image: "/products/rcai/rc-forklift/blue.webp",
+        altImages: ["/products/rcai/rc-forklift/blue-2.webp", "/products/rcai/rc-forklift/blue-3.webp", "/products/rcai/rc-forklift/blue-4.webp"] },
+      { name: "Pink", slug: "pink", swatch: "#f48fb1", stock: 0, image: "/products/rcai/rc-forklift/pink.webp",
+        altImages: ["/products/rcai/rc-forklift/pink-2.webp", "/products/rcai/rc-forklift/pink-3.webp", "/products/rcai/rc-forklift/pink-4.webp"] },
+      { name: "Red", slug: "red", swatch: "#d32f2f", stock: 0, image: "/products/rcai/rc-forklift/red.webp",
+        altImages: ["/products/rcai/rc-forklift/red-2.webp", "/products/rcai/rc-forklift/red-3.webp", "/products/rcai/rc-forklift/red-4.webp"] },
+    ],
     specs: { lengthMM: 110, drive: "2WD", topSpeedKmh: 5, batteryMin: 20, chargeMin: 60, rangeM: 16, minAge: 6, led: "Work lamp", drift: "No" },
   },
   // ---- Sep 2026 intake (photo shoot 2026-09-15) ----------------------------
