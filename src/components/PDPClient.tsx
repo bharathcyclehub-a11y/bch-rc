@@ -312,6 +312,21 @@ export default function PDPClient({
 
         <p className="text-sm sm:text-lg text-brand-ink-soft mt-2">{sku.tagline}</p>
 
+        {/* Mixed-colour SKUs: stock isn't tracked per colour, so there is no
+            picker — we say so plainly instead of letting a buyer choose one we
+            might not ship. The gallery's colour image shows the range. */}
+        {!sku.colors?.length && sku.colourNote && (
+          <div className="mt-3 sm:mt-5">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest text-brand-ink-soft">
+                Colour
+              </span>
+              <span className="text-xs sm:text-sm font-semibold text-brand-ink">Mixed colour</span>
+            </div>
+            <p className="mt-1 text-[11px] leading-snug text-brand-ink-soft sm:text-xs">{sku.colourNote}</p>
+          </div>
+        )}
+
         {/* Color picker — moved above price so it's visible in the mobile fold
             without scrolling. Most buyers decide colour before re-checking price. */}
         {sku.colors && sku.colors.length > 0 && (
