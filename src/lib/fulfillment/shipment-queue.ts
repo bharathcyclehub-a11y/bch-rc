@@ -33,6 +33,13 @@ import { logError } from "@/lib/logger";
 /** Minutes a PROCESSING lease is honored before the job is considered stuck. */
 const LEASE_MINUTES = 5;
 
+/**
+ * Minimum gap between two heal attempts on the same finished-but-shipmentless
+ * job (step 2b in `drainShipmentJobs`). Keeps self-healing without turning a
+ * persistent upstream failure into a retry storm.
+ */
+const HEAL_COOLDOWN_MINUTES = 60;
+
 function backoffSeconds(attempt: number): number {
   // 1m, 2m, 4m, 8m, 16m, capped at 30m.
   return Math.min(60 * 2 ** Math.max(0, attempt - 1), 1800);
@@ -78,6 +85,11 @@ async function finalize(
         updatedAt: new Date(),
       })
       .where(eq(shipmentJobs.orderId, orderId));
+
+    // Only alert the FIRST time a job exhausts its budget. A healed job (step
+    // 2b) keeps its attempt count, so without this an order stuck on a
+    // persistent upstream failure re-alerts on every heal cycle forever.
+    if (attempts > maxAttempts) return;
 
     const [o] = await db
       .select({ siteId: orders.siteId, customerId: orders.customerId, status: orders.status })
@@ -222,6 +234,13 @@ export async function drainShipmentJobs(
   // Reset the job to PENDING so it re-creates. Forward-path code now throws on
   // a missing id (never marks DONE with "undefined"), so this only catches
   // pre-fix rows + any future regression. Belt-and-suspenders.
+  //
+  // Rate-limited by HEAL_COOLDOWN_MINUTES: without it this resurrects a job
+  // every single cron tick, which silently defeats max_attempts. During the
+  // Sep-2026 Shiprocket IP block that meant ~290 auth attempts/day per stuck
+  // order against a provider that was already refusing us, plus an ops alert
+  // each time it re-exhausted (2,345 OPS_ALERT rows in 4 days). Healing hourly
+  // still recovers every stuck order on its own once the cause clears.
   const stuck = await db
     .update(shipmentJobs)
     .set({
@@ -234,6 +253,10 @@ export async function drainShipmentJobs(
     .where(
       and(
         inArray(shipmentJobs.status, ["DONE", "FAILED"]),
+        lte(
+          shipmentJobs.updatedAt,
+          new Date(Date.now() - HEAL_COOLDOWN_MINUTES * 60 * 1000),
+        ),
         inArray(
           shipmentJobs.orderId,
           db
