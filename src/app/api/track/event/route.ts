@@ -14,6 +14,7 @@ import { recordFunnelEvents, type FunnelEventInput } from "@/lib/funnel-server";
 import { isTrackingUuid, MAX_FUNNEL_BATCH, MAX_FUNNEL_BODY_BYTES } from "@/lib/funnel-events";
 import { VISITOR_COOKIE } from "@/lib/analytics";
 import { rateLimit } from "@/lib/rate-limit";
+import { isSameOriginRequest } from "@/lib/request-origin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,8 +22,7 @@ export const dynamic = "force-dynamic";
 type Body = { events?: FunnelEventInput[] };
 
 export async function POST(req: NextRequest) {
-  const origin = req.headers.get("origin");
-  if ((origin && origin !== req.nextUrl.origin) || req.headers.get("sec-fetch-site") === "cross-site" || !isTrackingUuid(req.cookies.get(VISITOR_COOKIE)?.value)) {
+  if (!isSameOriginRequest(req) || req.headers.get("sec-fetch-site") === "cross-site" || !isTrackingUuid(req.cookies.get(VISITOR_COOKIE)?.value)) {
     return new NextResponse(null, { status: 204 });
   }
   // Shed floods that would bloat funnel_events. Silent 204 keeps the
