@@ -14,6 +14,7 @@ but **only once the repo variable `VPS_DEPLOY_ENABLED` is `true`**. Until then i
   releases/<git-sha>/   last 5 releases
   current -> releases/<git-sha>
   shared/.env           runtime secrets, rewritten on each deploy (mode 600)
+  shared/image-cache/   optimized images, namespaced by public asset digest
 ```
 
 ## 1. VPS prerequisites (one time)
@@ -101,7 +102,25 @@ apt-get install -y certbot python3-certbot-nginx
 certbot --nginx -d pocketrccars.com -d www.pocketrccars.com   # after DNS points here
 ```
 
+After Certbot installs TLS, enable HTTP/2 in this site's HTTPS `server` block.
+On nginx 1.25.1 or newer add `http2 on;`; on older nginx use
+`listen 443 ssl http2;` (and the equivalent IPv6 listener). Run `nginx -t` before
+reloading. Without HTTP/2, browsers queue this image-heavy storefront behind
+the HTTP/1.1 connection limit.
+
 `X-Forwarded-For` is set to `$remote_addr` (not appended) so a client cannot spoof it.
+
+### Image performance
+
+Standalone builds prefer WebP because cold AVIF transforms are expensive on the
+2-vCPU VPS. `remote-deploy.sh` links `.next/cache/images` to a persistent directory
+under `shared/image-cache`. Code-only deployments retain the cache; changing any
+file in `public` selects a fresh cache namespace. The first migration copies the
+previous release's cache only when its public asset digest matches. Old cache
+namespaces remain available for rollback; include their disk usage in maintenance.
+
+The hub uses media-qualified hero preloads, a responsive logo size, and lazy review
+photos so below-fold and hidden-carousel images do not compete with the first banner.
 
 ## 5. Cutting over from Vercel
 

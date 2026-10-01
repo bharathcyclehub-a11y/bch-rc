@@ -43,6 +43,26 @@ rm -f "$INCOMING/release.tgz"
 
 PREVIOUS="$(readlink -f "$APP_DIR/current" 2>/dev/null || true)"
 
+# Image transforms are expensive on a small VPS. Keep them across code-only
+# deployments, but use a new namespace when any public asset changes so URLs
+# with long TTLs cannot serve an older release's image bytes.
+public_digest() {
+  (cd "$1/public" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)
+}
+IMAGE_CACHE="$APP_DIR/shared/image-cache/$(public_digest "$RELEASE")"
+if [ ! -d "$IMAGE_CACHE" ]; then
+  mkdir -p "$IMAGE_CACHE"
+  if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS/.next/cache/images" ] \
+    && [ "$(public_digest "$PREVIOUS")" = "$(public_digest "$RELEASE")" ]; then
+    cp -a "$PREVIOUS/.next/cache/images/." "$IMAGE_CACHE/"
+  fi
+fi
+mkdir -p "$RELEASE/.next/cache"
+if [ -e "$RELEASE/.next/cache/images" ]; then
+  mv "$RELEASE/.next/cache/images" "$RELEASE/.next/cache/images.bundled"
+fi
+ln -s "$IMAGE_CACHE" "$RELEASE/.next/cache/images"
+
 activate() {
   ln -sfn "$1" "$APP_DIR/current.tmp"
   mv -Tf "$APP_DIR/current.tmp" "$APP_DIR/current"

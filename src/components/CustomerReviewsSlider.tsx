@@ -188,7 +188,7 @@ export default function CustomerReviewsSlider({ compact = false }: { compact?: b
       >
         <ul className="flex gap-3 sm:gap-4 px-4 w-max">
           {[...REVIEWS, ...REVIEWS].map((r, i) => (
-            <ReviewCard key={i} review={r} priority={i < 3} compact={compact} />
+            <ReviewCard key={i} review={r} compact={compact} />
           ))}
         </ul>
       </div>
@@ -198,11 +198,9 @@ export default function CustomerReviewsSlider({ compact = false }: { compact?: b
 
 function ReviewCard({
   review,
-  priority,
   compact = false,
 }: {
   review: Review;
-  priority: boolean;
   compact?: boolean;
 }) {
   const padded = String(review.img).padStart(2, "0");
@@ -214,8 +212,7 @@ function ReviewCard({
           alt={`${review.name} from ${review.city} with their PRC drift car`}
           fill
           sizes={compact ? "(max-width: 640px) 160px, 260px" : "(max-width: 640px) 220px, 260px"}
-          priority={priority}
-          loading={priority ? undefined : "lazy"}
+          loading="lazy"
           className="object-cover"
         />
         {/* Quote overlay — gradient floor so text stays readable against

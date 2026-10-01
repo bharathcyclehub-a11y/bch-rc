@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import Image from "next/image";
+import Image, { getImageProps } from "next/image";
 import Link from "next/link";
 
 /**
@@ -155,7 +155,28 @@ function Banner({
   small?: boolean;
   priority?: boolean;
 }) {
+  const imageProps = getImageProps({
+    src: s.src,
+    alt: s.alt,
+    width: w,
+    height: h,
+    sizes: "100vw",
+  }).props;
   return (
+    <>
+      {/* Only preload the visible carousel. CSS hiding alone does not stop
+          next/image's unconditional priority preloads on the other viewport. */}
+      {priority && (
+        <link
+          rel="preload"
+          as="image"
+          href={imageProps.src}
+          imageSrcSet={imageProps.srcSet}
+          imageSizes={imageProps.sizes}
+          media={small ? "(max-width: 639px)" : "(min-width: 640px)"}
+          fetchPriority="high"
+        />
+      )}
     <div className="relative h-[calc(100svh-2rem)] w-full shrink-0 snap-center">
       {/* next/link, not <a>: a raw anchor tears down the whole React tree and
           re-downloads the page for what should be a client transition. */}
@@ -166,7 +187,8 @@ function Banner({
           width={w}
           height={h}
           sizes="100vw"
-          {...(priority ? { priority: true } : { loading: "lazy" as const })}
+          loading="lazy"
+          fetchPriority={priority ? "high" : undefined}
           className="h-full w-full object-cover"
         />
       </Link>
@@ -190,6 +212,7 @@ function Banner({
         </Link>
       </div>
     </div>
+    </>
   );
 }
 
