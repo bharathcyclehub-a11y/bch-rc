@@ -77,7 +77,9 @@ export async function POST(req: Request) {
       processed: false,
     });
   } catch (err: unknown) {
-    if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+    // Drizzle wraps the driver error (DrizzleQueryError), so the code is on `cause`.
+    const e = err as { code?: string; cause?: { code?: string } } | null;
+    if ((e?.code ?? e?.cause?.code) === "23505") {
       // Already received. Acknowledge so Razorpay stops retrying.
       return NextResponse.json({ ok: true, duplicate: true });
     }
