@@ -274,7 +274,6 @@ describe("tracking pipeline (integration)", () => {
   });
 
   it("a courier refusal (403 at login) opens the circuit and stops further calls", async () => {
-    m.dbmod; // keep reference
     const { invalidateShiprocketToken } = await import("../../src/lib/shiprocket");
     invalidateShiprocketToken();
     stub.login = 403;

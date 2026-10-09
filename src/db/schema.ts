@@ -90,6 +90,10 @@ export const adminRoleEnum = pgEnum("admin_role", [
   "OWNER",
   "MANAGER",
   "SUPPORT",
+  // migrations/manual/2026-10-09_support_centre.sql
+  "SUPPORT_SUPERVISOR",
+  "WAREHOUSE",
+  "FINANCE",
 ]);
 
 // ============================================================
@@ -1204,6 +1208,249 @@ export const appSettings = pgTable("app_settings", {
 });
 
 // ============================================================
+// 14. SUPPORT CENTRE (2026-10-09)
+// ============================================================
+// migrations/manual/2026-10-09_support_centre.sql. Tickets, claims and refund
+// cases REFERENCE orders/customers; the canonical order, payment, product and
+// inventory records are never copied. See src/lib/support/.
+
+export const supportVerifications = pgTable(
+  "support_verifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderId: text("order_id").notNull().references(() => orders.id),
+    customerId: uuid("customer_id").notNull().references(() => customers.id),
+    channel: text("channel").notNull().default("EMAIL"),
+    destinationMasked: text("destination_masked").notNull(),
+    /** HMAC of the code — the code itself is never stored or logged. */
+    codeHash: text("code_hash").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    ipHash: text("ip_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("support_verifications_order_idx").on(t.orderId, t.createdAt),
+    index("support_verifications_ip_idx").on(t.ipHash, t.createdAt),
+  ],
+);
+
+export const supportTickets = pgTable(
+  "support_tickets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Customer-facing reference, e.g. "T-7KQ2M9". */
+    number: text("number").notNull(),
+    siteId: text("site_id").notNull().references(() => sites.id),
+    customerId: uuid("customer_id").references(() => customers.id),
+    orderId: text("order_id").references(() => orders.id),
+    /** Code-catalogue SKU the ticket is about, if any. */
+    skuId: text("sku_id"),
+    /** TicketCategory (src/lib/support/categories.ts). */
+    category: text("category").notNull(),
+    subject: text("subject").notNull(),
+    /** TicketStatus. */
+    status: text("status").notNull().default("NEW"),
+    /** LOW | MEDIUM | HIGH | CRITICAL — set by documented rules (priority.ts). */
+    priority: text("priority").notNull().default("MEDIUM"),
+    priorityReason: text("priority_reason"),
+    /** WEB | CHAT | WHATSAPP | VOICE | ADMIN */
+    channel: text("channel").notNull().default("WEB"),
+    contactName: text("contact_name"),
+    contactEmail: text("contact_email"),
+    contactPhone: text("contact_phone"),
+    /** Raised from a verified session (order ownership proven). */
+    identityVerified: boolean("identity_verified").notNull().default(false),
+    /** SHA-256 of the secret in the customer's ticket link. */
+    accessTokenHash: text("access_token_hash"),
+    safetyFlag: boolean("safety_flag").notNull().default(false),
+    /** Admin email. */
+    assignedTo: text("assigned_to"),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    escalationReason: text("escalation_reason"),
+    /** Whose move it is: STAFF | CUSTOMER | NONE */
+    awaiting: text("awaiting").notNull().default("STAFF"),
+    firstResponseDueAt: timestamp("first_response_due_at", { withTimezone: true }),
+    resolutionDueAt: timestamp("resolution_due_at", { withTimezone: true }),
+    firstResponseAt: timestamp("first_response_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    reopenCount: integer("reopen_count").notNull().default(0),
+    lastCustomerMessageAt: timestamp("last_customer_message_at", { withTimezone: true }),
+    lastStaffMessageAt: timestamp("last_staff_message_at", { withTimezone: true }),
+    /** Hand-off context: troubleshooting steps tried, chat summary, etc. */
+    context: jsonb("context").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("support_tickets_number_unique").on(t.number),
+    index("support_tickets_status_idx").on(t.status, t.priority, t.createdAt),
+    index("support_tickets_order_idx").on(t.orderId),
+    index("support_tickets_customer_idx").on(t.customerId),
+    index("support_tickets_assigned_idx").on(t.assignedTo, t.status),
+  ],
+);
+
+export const supportTicketMessages = pgTable(
+  "support_ticket_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id),
+    /** CUSTOMER | STAFF | SYSTEM | ASSISTANT */
+    authorType: text("author_type").notNull(),
+    authorName: text("author_name"),
+    authorEmail: text("author_email"),
+    body: text("body").notNull(),
+    /** Staff-only note — never returned to the customer. */
+    internal: boolean("internal").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("support_ticket_messages_ticket_idx").on(t.ticketId, t.createdAt)],
+);
+
+export const supportTicketAttachments = pgTable(
+  "support_ticket_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id),
+    messageId: uuid("message_id").references(() => supportTicketMessages.id),
+    /** Path in the PRIVATE "support-evidence" bucket. */
+    storagePath: text("storage_path").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    originalName: text("original_name"),
+    /** CUSTOMER | STAFF */
+    uploadedBy: text("uploaded_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("support_ticket_attachments_ticket_idx").on(t.ticketId)],
+);
+
+export const supportTicketEvents = pgTable(
+  "support_ticket_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id),
+    type: text("type").notNull(),
+    /** "customer", "system", or the admin email. */
+    actor: text("actor").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("support_ticket_events_ticket_idx").on(t.ticketId, t.createdAt)],
+);
+
+export const supportClaims = pgTable(
+  "support_claims",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    number: text("number").notNull(),
+    ticketId: uuid("ticket_id").notNull().references(() => supportTickets.id),
+    orderId: text("order_id").notNull().references(() => orders.id),
+    customerId: uuid("customer_id").references(() => customers.id),
+    /** REPLACEMENT | RETURN */
+    type: text("type").notNull(),
+    /** ClaimStatus (src/lib/support/claims.ts). */
+    status: text("status").notNull().default("SUBMITTED"),
+    reason: text("reason").notNull(),
+    /** [{ skuId, variantSlug, name, qty }] from the order snapshot. */
+    items: jsonb("items").notNull().default([]),
+    /** Policy check snapshot at submission (window, delivered date, rules). */
+    eligibility: jsonb("eligibility").notNull().default({}),
+    /** Stock check snapshot for replacements. */
+    stock: jsonb("stock").notNull().default({}),
+    decisionBy: text("decision_by"),
+    decisionAt: timestamp("decision_at", { withTimezone: true }),
+    decisionNote: text("decision_note"),
+    replacementOrderId: text("replacement_order_id").references(() => orders.id),
+    /** Replacement or return-pickup AWB (tracked as a RETURN/REPLACEMENT shipment). */
+    shipmentAwb: text("shipment_awb"),
+    /** Replacement stock already decremented (exactly-once guard). */
+    stockCommitted: boolean("stock_committed").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("support_claims_number_unique").on(t.number),
+    index("support_claims_status_idx").on(t.status, t.createdAt),
+    index("support_claims_order_idx").on(t.orderId),
+  ],
+);
+
+export const refundCases = pgTable(
+  "refund_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderId: text("order_id").notNull().references(() => orders.id),
+    ticketId: uuid("ticket_id").references(() => supportTickets.id),
+    claimId: uuid("claim_id").references(() => supportClaims.id),
+    amountInr: integer("amount_inr").notNull(),
+    reason: text("reason").notNull(),
+    /** RAZORPAY (provider-confirmed) | MANUAL (COD bank/UPI payout, finance-recorded) */
+    method: text("method").notNull().default("RAZORPAY"),
+    /** REQUESTED | APPROVED | PROCESSING | PROCESSED | FAILED | REJECTED | CANCELLED */
+    status: text("status").notNull().default("REQUESTED"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestedBy: text("requested_by").notNull(),
+    approvedBy: text("approved_by"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    razorpayPaymentId: text("razorpay_payment_id"),
+    razorpayRefundId: text("razorpay_refund_id"),
+    providerStatus: text("provider_status"),
+    providerConfirmedAt: timestamp("provider_confirmed_at", { withTimezone: true }),
+    manualReference: text("manual_reference"),
+    failureReason: text("failure_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("refund_cases_idempotency_unique").on(t.idempotencyKey),
+    uniqueIndex("refund_cases_razorpay_refund_unique")
+      .on(t.razorpayRefundId)
+      .where(sql`razorpay_refund_id IS NOT NULL`),
+    index("refund_cases_order_idx").on(t.orderId),
+    index("refund_cases_status_idx").on(t.status, t.createdAt),
+  ],
+);
+
+export const helpArticles = pgTable(
+  "help_articles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    /** GETTING_STARTED | TROUBLESHOOTING | MAINTENANCE | ORDERS | POLICY */
+    category: text("category").notNull(),
+    /** { steps: [{ title, text, image? }], note? } */
+    body: jsonb("body").notNull().default({}),
+    videoUrl: text("video_url"),
+    /** Code-catalogue SKU ids this article applies to; empty = all products. */
+    skuIds: text("sku_ids").array().notNull().default(sql`'{}'::text[]`),
+    relatedSlugs: text("related_slugs").array().notNull().default(sql`'{}'::text[]`),
+    difficulty: text("difficulty").notNull().default("EASY"),
+    /** DRAFT | PUBLISHED | ARCHIVED */
+    status: text("status").notNull().default("DRAFT"),
+    /** Shown to customers as "being verified by our team" until staff confirm. */
+    needsVerification: boolean("needs_verification").notNull().default(true),
+    verifiedBy: text("verified_by"),
+    lastReviewedAt: timestamp("last_reviewed_at", { withTimezone: true }),
+    helpfulYes: integer("helpful_yes").notNull().default(0),
+    helpfulNo: integer("helpful_no").notNull().default(0),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("help_articles_slug_unique").on(t.slug),
+    index("help_articles_status_idx").on(t.status, t.category),
+  ],
+);
+
+// ============================================================
 // Inferred types for app code
 // ============================================================
 
@@ -1241,3 +1488,8 @@ export type NewBargainSession = typeof bargainSessions.$inferInsert;
 export type ShipmentTrackingRow = typeof shipmentTracking.$inferSelect;
 export type ShipmentTrackingEventRow = typeof shipmentTrackingEvents.$inferSelect;
 export type DeliveryExceptionRow = typeof deliveryExceptions.$inferSelect;
+export type SupportTicketRow = typeof supportTickets.$inferSelect;
+export type SupportTicketMessageRow = typeof supportTicketMessages.$inferSelect;
+export type SupportClaimRow = typeof supportClaims.$inferSelect;
+export type RefundCaseRow = typeof refundCases.$inferSelect;
+export type HelpArticleRow = typeof helpArticles.$inferSelect;

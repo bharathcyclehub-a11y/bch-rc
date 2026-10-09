@@ -5,7 +5,8 @@ import { THEME } from "@/lib/theme";
 
 const QUICK_LINKS = [
   { label: "Shop", href: "/#sku" },
-  { label: "Track order", href: "/track" },
+  { label: "Track order", href: "/support/track" },
+  { label: "Support centre", href: "/support" },
   { label: "Privacy", href: "/policies/privacy" },
   { label: "Terms", href: "/policies/terms" },
   { label: "Shipping", href: "/policies/shipping" },

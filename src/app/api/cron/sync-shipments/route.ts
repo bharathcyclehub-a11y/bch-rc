@@ -20,6 +20,8 @@
 import { NextResponse } from "next/server";
 import { runTrackingSync } from "@/lib/tracking/sync";
 import { drainNotificationsOutbox } from "@/lib/notifications/drain";
+import { runSupportMaintenance } from "@/lib/support/tickets";
+import { purgeOldVerifications } from "@/lib/support/verify";
 import { logError } from "@/lib/logger";
 
 export const maxDuration = 300;
@@ -39,6 +41,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "tracking sync failed" }, { status: 500 });
   }
 
+  // Support housekeeping: auto-close resolved tickets after the reopen
+  // window, drop expired verification codes. Never blocks tracking.
+  let support: { autoClosed: number } | { error: string } = { autoClosed: 0 };
+  try {
+    support = await runSupportMaintenance();
+    await purgeOldVerifications();
+  } catch (err) {
+    logError("cron:support-maintenance", err);
+    support = { error: "support maintenance failed" };
+  }
+
   let notifications = { drained: 0, sent: 0, failed: 0, exhausted: 0 };
   try {
     notifications = await drainNotificationsOutbox(200);
@@ -46,5 +59,5 @@ export async function GET(req: Request) {
     logError("cron:drain-outbox", err);
   }
 
-  return NextResponse.json({ ok: true, backfill, tracking, notifications });
+  return NextResponse.json({ ok: true, backfill, tracking, support, notifications });
 }

@@ -92,18 +92,18 @@ export type Announcement = {
 // whatever cue occupies the privileged opening moment becomes the focal
 // criterion. Leading with "Pay online → ₹100 bonus" framed the page as
 // "is it worth it?" before desire could build. Now the marquee opens on
-// "Ships today from Bangalore" (operational reassurance), then the COD
+// "Dispatched within 24 hrs" (operational reassurance), then the COD
 // pan-India reliever, then the bonus.
 export const ANNOUNCEMENTS: Announcement[] = [
   {
-    text: "Ships today from Bangalore · order before 4 PM",
+    text: "Dispatched within 24 hrs from Bangalore",
   },
   {
     emoji: "📦",
     text: "Pan-India COD · 7-day replacement · real WhatsApp support",
   },
   {
-    text: "Pay online → ₹100 bonus + same-day dispatch",
+    text: "Pay online → ₹100 bonus + 24-hr dispatch",
   },
 ];
 
@@ -130,7 +130,7 @@ export const FAQS: { q: string; a: string; defaultOpen?: boolean }[] = [
   },
   {
     q: "What if it breaks?",
-    a: "7-day free replacement. WhatsApp a photo, fresh one ships same day. Spare shell ₹99, battery ₹199.",
+    a: "7-day free replacement. WhatsApp a photo, fresh one ships in 24 hrs. Spare shell ₹99, battery ₹199.",
   },
   {
     q: "Where do you ship?",

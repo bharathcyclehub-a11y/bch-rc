@@ -40,6 +40,15 @@ const VPS_HEADERS = [
 
 const nextConfig: NextConfig = {
   ...(isVps ? { output: "standalone" as const } : {}),
+  experimental: {
+    // Support-ticket evidence (photos / short videos) is posted through server
+    // actions, whose default body limit is 1 MB. 20 MB matches nginx's
+    // client_max_body_size on the VPS; the forms cap a submission at 19 MB.
+    serverActions: { bodySizeLimit: "20mb" },
+    // middleware.ts runs on every route and buffers request bodies up to this
+    // size (default 10 MB) — it must not be smaller than the upload limit.
+    proxyClientMaxBodySize: "20mb",
+  },
   async redirects() {
     return isVps ? VPS_REDIRECTS : [];
   },

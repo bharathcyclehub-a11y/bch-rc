@@ -9,9 +9,9 @@
  *     - Emits an `ADMIN_NOTE_SAVED` event so the change shows in the timeline.
  *
  *   refundOrderFully(orderId)
- *     - Calls Razorpay /v1/payments/{id}/refund for the full captured amount.
- *     - Updates orders.status + paymentStatus to REFUNDED.
- *     - Emits a `REFUND_INITIATED` event.
+ *     - OWNER/FINANCE only. Opens a refund case for the remaining captured
+ *       amount and executes it (src/lib/support/refunds.ts); the order turns
+ *       REFUNDED only when Razorpay confirms.
  *     - Refuses if the order isn't refundable (no payment id, already
  *       refunded, or COD without a captured payment).
  *
@@ -22,9 +22,10 @@
 import { revalidatePath } from "next/cache";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { events, orders } from "@/db/schema";
+import { events, orders, refundCases } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
-import { razorpay } from "@/lib/razorpay";
+import { can } from "@/lib/admin/permissions";
+import { approveRefund, onlineRefundable, requestRefund } from "@/lib/support/refunds";
 import { logError } from "@/lib/logger";
 import { releaseOrderHolds } from "@/lib/inventory/release";
 import { confirmCodOrderCore, rejectCodOrderCore } from "@/lib/cod-verify";
@@ -111,8 +112,19 @@ export async function saveOrderNote(
   return { ok: true, message: "Note saved." };
 }
 
+/**
+ * Full online refund — now a refund case (src/lib/support/refunds.ts) so it
+ * gets the same guarantees as support refunds: only OWNER/FINANCE may run it,
+ * the refundable amount is what Razorpay actually captured (the COD
+ * confirmation fee, not the order total, for part-prepaid COD), a double
+ * click can't refund twice, and the order is marked REFUNDED only when
+ * Razorpay confirms (webhook refund.processed or API read-back).
+ */
 export async function refundOrderFully(orderId: string): Promise<ActionResult> {
   const ctx = await requireAdmin();
+  if (!can(ctx.role, "refunds.approve")) {
+    return { ok: false, error: "Only an owner or finance approver can issue refunds. Raise a refund request from the support ticket instead." };
+  }
 
   const [order] = await db
     .select()
@@ -135,60 +147,36 @@ export async function refundOrderFully(orderId: string): Promise<ActionResult> {
   if (order.status === "REFUNDED" || order.paymentStatus === "REFUNDED") {
     return { ok: false, error: "Already refunded." };
   }
-  // Refunding from CANCELLED/FAILED/ABANDONED is fine — we still want to
-  // give the customer their money back if anything captured. The only
-  // hard block above is "already refunded".
 
   try {
-    // Razorpay refund API: amount in paise. totalInr stores rupees, so ×100.
-    // Omitting `amount` would do a full refund of whatever Razorpay knows
-    // about; we pass it explicitly so partial captures are handled
-    // intentionally.
-    await razorpay.payments.refund(order.razorpayPaymentId, {
-      amount: order.totalInr * 100,
-      speed: "normal",
-      notes: {
-        order_id: order.id,
-        site_id: order.siteId,
-        admin_email: ctx.email,
-      },
-    });
-  } catch (err) {
-    logError("admin:refund:razorpay", err, {
+    const pending = await db
+      .select({ amount: refundCases.amountInr })
+      .from(refundCases)
+      .where(and(eq(refundCases.orderId, orderId), eq(refundCases.method, "RAZORPAY"), inArray(refundCases.status, ["REQUESTED", "APPROVED", "PROCESSING", "PROCESSED"])));
+    const remaining = onlineRefundable(order) - pending.reduce((s, r) => s + r.amount, 0);
+    if (remaining <= 0) return { ok: false, error: "A refund for the full captured amount already exists for this order." };
+    const c = await requestRefund({
       orderId,
-      paymentId: order.razorpayPaymentId,
+      amountInr: remaining,
+      reason: "Full refund from the order page",
+      method: "RAZORPAY",
+      requestedBy: ctx.email,
+      idempotencyKey: `admin-full:${orderId}:${Math.floor(Date.now() / 60_000)}`,
     });
+    const done = await approveRefund(c, ctx.email);
+    revalidatePath(`/admin/orders/${orderId}`);
+    return {
+      ok: true,
+      message:
+        done.status === "PROCESSED"
+          ? `Refund of ₹${done.amountInr.toLocaleString("en-IN")} confirmed by Razorpay.`
+          : `Refund of ₹${done.amountInr.toLocaleString("en-IN")} initiated. The order is marked refunded once Razorpay confirms.`,
+    };
+  } catch (err) {
+    logError("admin:refund:razorpay", err, { orderId, paymentId: order.razorpayPaymentId });
     const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `Razorpay refund failed: ${msg}` };
+    return { ok: false, error: msg };
   }
-
-  await db
-    .update(orders)
-    .set({
-      status: "REFUNDED",
-      paymentStatus: "REFUNDED",
-      cancelledAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(orders.id, orderId));
-
-  await db.insert(events).values({
-    siteId: order.siteId,
-    orderId,
-    type: "REFUND_INITIATED",
-    source: "admin",
-    payload: {
-      adminEmail: ctx.email,
-      amountInr: order.totalInr,
-      paymentId: order.razorpayPaymentId,
-    },
-  });
-
-  revalidatePath(`/admin/orders/${orderId}`);
-  return {
-    ok: true,
-    message: "Refund initiated. Razorpay will settle within 5-7 days.",
-  };
 }
 
 /**
