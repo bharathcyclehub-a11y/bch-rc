@@ -21,7 +21,7 @@
  * not the courier API is reachable, because they depend on time, not new data.
  */
 
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   events,
@@ -139,6 +139,8 @@ export async function repointTracking(trackingId: string, newAwb: string, reason
       status: "UNKNOWN",
       statusLabel: null,
       statusChangedAt: null,
+      summaryStatus: null,
+      summaryAt: null,
       lastEventAt: null,
       lastEventActivity: null,
       lastEventLocation: null,
@@ -318,6 +320,9 @@ async function retryFailedWebhooks(now: Date, notify: boolean): Promise<number> 
         eq(webhooksInbound.processed, false),
         lt(webhooksInbound.attempts, 5),
         lt(webhooksInbound.createdAt, new Date(now.getTime() - 2 * 60_000)),
+        // Only recent failures: never replay months-old events (or message
+        // customers about them) when this worker first goes live.
+        gt(webhooksInbound.createdAt, new Date(now.getTime() - 7 * 86_400_000)),
       ),
     )
     .limit(20);

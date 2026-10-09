@@ -158,7 +158,7 @@ export type ShiprocketWebhook = {
 
 /**
  * Shiprocket names a re-created ("cloned") order after ours with a suffix —
- * PRC-3RSJCZTY becomes PRC-3RSJCZTY-C. Returns the base id to match on, or
+ * PRC-ABCD1234 becomes PRC-ABCD1234-C. Returns the base id to match on, or
  * null when there is no such suffix.
  */
 export function baseOrderId(channelOrderId: string | null | undefined): string | null {

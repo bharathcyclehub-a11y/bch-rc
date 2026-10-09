@@ -27,6 +27,7 @@ import {
   snapshotEvents,
 } from "../../src/lib/tracking/carrier";
 import { noticeSendAt } from "../../src/lib/notifications/quiet-hours";
+import { deriveTrackingStatus } from "../../src/lib/tracking/derive";
 
 /** IST wall-clock → Date. */
 const ist = (s: string) => {
@@ -241,12 +242,12 @@ describe("Scenario E — courier API unavailable", () => {
   });
 });
 
-describe("re-ships and courier cancellations (PRC-3RSJCZTY, Oct 2026)", () => {
+describe("re-ships and courier cancellations (PRC-ABCD1234, Oct 2026)", () => {
   const now = ist("2026-10-09 11:20:00");
   it("matches a Shiprocket clone id to its base order", () => {
-    assert.equal(baseOrderId("PRC-3RSJCZTY-C"), "PRC-3RSJCZTY");
-    assert.equal(baseOrderId("PRC-3RSJCZTY-C2"), "PRC-3RSJCZTY");
-    assert.equal(baseOrderId("PRC-3RSJCZTY"), null);
+    assert.equal(baseOrderId("PRC-ABCD1234-C"), "PRC-ABCD1234");
+    assert.equal(baseOrderId("PRC-ABCD1234-C2"), "PRC-ABCD1234");
+    assert.equal(baseOrderId("PRC-ABCD1234"), null);
   });
   it("a courier cancellation never cancels the order", () => {
     assert.ok(!canTrackingMoveOrder("PAID", "CANCELLED"));
@@ -265,6 +266,61 @@ describe("re-ships and courier cancellations (PRC-3RSJCZTY, Oct 2026)", () => {
     const s = parseShiprocketWebhook({ awb: "1", current_status: "UNDELIVERED", undelivered_reason: "Consignee not available", delivery_attempt_count: "2" });
     assert.equal(s.reason, "Consignee not available");
     assert.equal(s.attemptCount, 2);
+  });
+});
+
+describe("real production labels (replayed 715 webhooks, Oct 2026)", () => {
+  const cases: Array<[string, string]> = [
+    ["Not Picked", "AWAITING_PICKUP"],
+    ["Pickup Not Done", "AWAITING_PICKUP"],
+    ["PickupFailed", "AWAITING_PICKUP"],
+    ["RTB Manifested", "DELIVERY_ATTEMPTED"],
+    ["Undelivered-AT SOURCE HUB", "DELIVERY_ATTEMPTED"],
+    ["At Destination", "IN_TRANSIT"],
+    ["Scheduled for Delivery", "IN_TRANSIT"],
+    ["REACHED BACK AT SELLER CITY", "RTO_DELIVERED"],
+    ["RTO NDR", "RTO_IN_TRANSIT"],
+    ["Dispatched - Dispatched for RTO", "RTO_IN_TRANSIT"],
+  ];
+  for (const [label, want] of cases) it(`${label} → ${want}`, () => assert.equal(normalizeCarrierStatus(label), want));
+});
+
+describe("status derivation: Shiprocket summary vs courier scans", () => {
+  const t = (s: string) => ist(s);
+  it("a poll's summary beats an older, mis-labelled scan (DTDC failed-attempt pattern, Oct 2026)", () => {
+    const r = deriveTrackingStatus({
+      previous: { status: "IN_TRANSIT", statusChangedAt: t("2026-09-16 20:51:00"), summary: null },
+      latestKnownScan: { status: "IN_TRANSIT", at: t("2026-09-28 22:21:00") },
+      snapshotSummary: { status: "DELIVERY_ATTEMPTED", at: t("2026-10-09 15:00:00") },
+      hasAwb: true,
+    });
+    assert.equal(r.status, "DELIVERY_ATTEMPTED");
+  });
+  it("a late webhook carrying an older summary can't drag the status back", () => {
+    const r = deriveTrackingStatus({
+      previous: { status: "OUT_FOR_DELIVERY", statusChangedAt: t("2026-10-09 09:00:00"), summary: { status: "OUT_FOR_DELIVERY", at: t("2026-10-09 09:00:00") } },
+      latestKnownScan: { status: "OUT_FOR_DELIVERY", at: t("2026-10-09 09:00:00") },
+      snapshotSummary: { status: "IN_TRANSIT", at: t("2026-10-08 18:00:00") },
+      hasAwb: true,
+    });
+    assert.equal(r.status, "OUT_FOR_DELIVERY");
+  });
+  it("a scan newer than any summary decides", () => {
+    const r = deriveTrackingStatus({
+      previous: { status: "IN_TRANSIT", statusChangedAt: t("2026-10-08 10:00:00"), summary: { status: "IN_TRANSIT", at: t("2026-10-08 10:00:00") } },
+      latestKnownScan: { status: "OUT_FOR_DELIVERY", at: t("2026-10-09 09:00:00") },
+      snapshotSummary: null,
+      hasAwb: true,
+    });
+    assert.equal(r.status, "OUT_FOR_DELIVERY");
+  });
+  it("delivered stays delivered unless a newer courier fact says otherwise", () => {
+    const base = { statusChangedAt: t("2026-10-09 12:00:00"), summary: { status: "DELIVERED" as const, at: t("2026-10-09 12:00:00") } };
+    const stale = deriveTrackingStatus({ previous: { status: "DELIVERED", ...base }, latestKnownScan: { status: "IN_TRANSIT", at: t("2026-10-08 10:00:00") }, snapshotSummary: null, hasAwb: true });
+    assert.equal(stale.status, "DELIVERED");
+    const fresh = deriveTrackingStatus({ previous: { status: "DELIVERED", ...base }, latestKnownScan: null, snapshotSummary: { status: "DELIVERY_ATTEMPTED", at: t("2026-10-10 12:00:00") }, hasAwb: true });
+    assert.equal(fresh.status, "DELIVERY_ATTEMPTED");
+    assert.equal(fresh.correction, true);
   });
 });
 

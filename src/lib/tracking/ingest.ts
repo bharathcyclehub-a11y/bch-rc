@@ -28,6 +28,7 @@ import { sendCustomerNotice } from "@/lib/notifications/customer-notice";
 import { releaseOrderHoldsBestEffort } from "@/lib/inventory/release";
 import { logError } from "@/lib/logger";
 import { scanFingerprint, snapshotEvents, type CarrierSnapshot } from "./carrier";
+import { deriveTrackingStatus } from "./derive";
 import {
   MOVING_STATUSES,
   TERMINAL_STATUSES,
@@ -166,30 +167,24 @@ export async function ingestSnapshot(
     const latestKnown = stored.find((e) => e.status !== "UNKNOWN") ?? null;
     const awb = currentAwb;
 
-    let status: TrackingStatus = latestKnown ? asStatus(latestKnown.status) : previousStatus;
-    let statusEventAt: Date | null = latestKnown?.eventAt ?? null;
+    // Shiprocket's summary status, timed: the webhook says when; a poll is
+    // Shiprocket's view right now. See derive.ts for why it outranks scans.
     const current = normalizeCarrierStatus(snap.currentLabel, kind);
-    if (!latestKnown && current !== "UNKNOWN") {
-      status = current;
-      statusEventAt = snap.currentAt;
-    } else if (!latestKnown && awb && (previousStatus === "AWAITING_AWB" || previousStatus === "UNKNOWN")) {
-      status = "AWAITING_PICKUP";
-    }
-    // A fresh poll reporting a final status outranks a lagging scan list.
-    if (source === "POLL" && TERMINAL_STATUSES.has(current) && !TERMINAL_STATUSES.has(status)) {
-      status = current;
-      statusEventAt = snap.deliveredAt ?? statusEventAt;
-    }
-    // A final status only moves on a genuinely NEWER courier event.
-    let correction = false;
-    if (TERMINAL_STATUSES.has(previousStatus) && status !== previousStatus) {
-      const newer = !!statusEventAt && !!row.statusChangedAt && statusEventAt > row.statusChangedAt;
-      if (newer) correction = true;
-      else {
-        status = previousStatus;
-        statusEventAt = row.statusChangedAt;
-      }
-    }
+    const summaryAt = source === "POLL" ? now : snap.currentAt;
+    const derived = deriveTrackingStatus({
+      previous: {
+        status: previousStatus,
+        statusChangedAt: row.statusChangedAt,
+        summary:
+          row.summaryStatus && row.summaryAt ? { status: asStatus(row.summaryStatus), at: row.summaryAt } : null,
+      },
+      latestKnownScan: latestKnown ? { status: asStatus(latestKnown.status), at: latestKnown.eventAt } : null,
+      snapshotSummary: current !== "UNKNOWN" && summaryAt ? { status: current, at: summaryAt } : null,
+      hasAwb: !!awb,
+    });
+    const status = derived.status;
+    const statusEventAt = status === "DELIVERED" ? (snap.deliveredAt ?? derived.statusAt) : derived.statusAt;
+    const correction = derived.correction;
     const statusChanged = status !== previousStatus;
 
     const attemptDays = new Set(
@@ -222,7 +217,13 @@ export async function ingestSnapshot(
       }
     }
 
-    const baseLabel = latestKnown?.label ?? latestKnown?.activity ?? snap.currentLabel ?? row.statusLabel;
+    // Shiprocket's wording when its summary decided the status, else the scan's.
+    const baseLabel =
+      (current !== "UNKNOWN" && current === status ? snap.currentLabel : null) ??
+      (latestKnown && asStatus(latestKnown.status) === status ? (latestKnown.label ?? latestKnown.activity) : null) ??
+      (status === previousStatus ? row.statusLabel : null) ??
+      latestKnown?.label ??
+      snap.currentLabel;
     const withReason =
       snap.reason && (status === "DELIVERY_ATTEMPTED" || status === "EXCEPTION" || status === "AWAITING_PICKUP")
         ? `${baseLabel ?? "Update"} — ${snap.reason}`
@@ -236,6 +237,8 @@ export async function ingestSnapshot(
       pickedUpAt,
       deliveredAt,
       deliveryAttempts,
+      summaryStatus: derived.summary?.status ?? row.summaryStatus,
+      summaryAt: derived.summary?.at ?? row.summaryAt,
       baselineAt: row.baselineAt ?? now,
       updatedAt: now,
     };

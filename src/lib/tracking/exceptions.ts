@@ -296,6 +296,14 @@ export async function reconcileExceptions(
             .set({ customerNotifiedAt: now })
             .where(eq(deliveryExceptions.id, id));
         }
+      } else if (!ctx.notify && created && e.customerVisible) {
+        // Silent run (first-deploy backfill): a condition that already existed
+        // is marked handled, so the next normal run doesn't email customers
+        // about it. Staff still see the exception.
+        await db
+          .update(deliveryExceptions)
+          .set({ customerNotifiedAt: now, context: sql`${deliveryExceptions.context} || '{"customerNoticeSuppressed":"silent sync"}'::jsonb` })
+          .where(eq(deliveryExceptions.id, id));
       }
     } catch (err) {
       logError("tracking:exception", err, { orderId: row.orderId, type: e.type });

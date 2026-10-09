@@ -1063,6 +1063,9 @@ export const shipmentTracking = pgTable(
     /** Courier's own wording for the current status. */
     statusLabel: text("status_label"),
     statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    /** Shiprocket's summary status + when reported (src/lib/tracking/derive.ts). */
+    summaryStatus: text("summary_status"),
+    summaryAt: timestamp("summary_at", { withTimezone: true }),
     /** Courier scan time of the newest verified event — never our clock. */
     lastEventAt: timestamp("last_event_at", { withTimezone: true }),
     lastEventActivity: text("last_event_activity"),

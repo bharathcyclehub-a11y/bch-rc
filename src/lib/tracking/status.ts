@@ -107,9 +107,15 @@ export function normalizeCarrierStatus(
   if (
     has(s, "UNDELIVERED", "UNDELIVERD", "NOT DELIVERED", "DELIVERY ATTEMPT", "FAILED DELIVERY") ||
     has(s, "ISSUE RELATED TO THE RECIPIENT", "CONSIGNEE NOT AVAILABLE", "CONSIGNEE REFUSED", "DOOR LOCKED") ||
-    /\bNDR\b/.test(s)
+    /\bNDR\b/.test(s) ||
+    // DTDC "RTB Manifested": back to the delivery branch after failed attempts.
+    /\bRTB\b/.test(s)
   ) {
     return "DELIVERY_ATTEMPTED";
+  }
+  // "Not Picked", "Pickup Not Done", "PickupFailed" — before the PICKED rule.
+  if (has(s, "NOT PICKED", "PICKUP NOT DONE", "PICKUPFAILED", "PICKUP FAILED", "PICKUP AWAITED", "PICKUP REQUEST")) {
+    return "AWAITING_PICKUP";
   }
   if (has(s, "OUT FOR DELIVERY") || /\bOFD\b/.test(s)) return "OUT_FOR_DELIVERY";
   if (has(s, "DELIVERED")) return "DELIVERED";
@@ -125,7 +131,8 @@ export function normalizeCarrierStatus(
   if (has(s, "PICKED UP", "PICKED", "SHIPPED", "HANDOVER TO COURIER", "HANDED OVER")) return "PICKED_UP";
   if (
     has(s, "IN TRANSIT", "INTRANSIT", "TRANSIT", "EN-ROUTE", "ENROUTE", "REACHED", "ARRIVED") ||
-    has(s, "DISPATCHED", "CONNECTED", "CONNECTION", "BAGGED", "IN FLIGHT", "DEPARTED", "RECEIVED AT")
+    has(s, "DISPATCHED", "CONNECTED", "CONNECTION", "BAGGED", "IN FLIGHT", "DEPARTED", "RECEIVED AT") ||
+    has(s, "AT DESTINATION", "SCHEDULED FOR DELIVERY", "PROCESSING CENTER", "INSCAN", "OUTSCAN")
   ) {
     return "IN_TRANSIT";
   }
@@ -188,7 +195,7 @@ export function orderStatusFor(status: TrackingStatus): OrderStatusFromTracking 
  * A courier CANCELLATION never cancels the order. Ops cancel a Shiprocket
  * shipment to re-ship it with another courier (a "-C" clone); the old code
  * turned that into an order cancellation and released the stock while the
- * parcel was still going to the customer (PRC-3RSJCZTY, Oct 2026). It is now a
+ * parcel was still going to the customer (a production order, Oct 2026). It is now a
  * SHIPMENT_CANCELLED exception for staff to re-ship or cancel deliberately.
  */
 const ALLOWED: Record<string, ReadonlySet<OrderStatusFromTracking>> = {

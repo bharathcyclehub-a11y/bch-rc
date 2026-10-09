@@ -303,6 +303,32 @@ describe("tracking pipeline (integration)", () => {
     assert.equal(await count(notificationsOutbox, m.orm.eq(notificationsOutbox.dedupKey, `${orderId}:DELIVERED:email`)), 1);
   });
 
+  it("the first-deploy backfill sends nothing — and the next normal run stays silent about pre-existing delays", async () => {
+    const dAwb = `BFD${Date.now()}`;
+    const sAwb = `BFS${Date.now()}`;
+    const deliveredId = await makeOrder({ status: "SHIPPED", awb: dAwb });
+    const staleId = await makeOrder({ status: "SHIPPED", awb: sAwb });
+    stub.track.set(dAwb, {
+      status: 200,
+      body: trackBody(dAwb, "DELIVERED", [scan("2026-10-07 11:00:00", "PICKED UP", "Picked up", "Bengaluru"), scan("2026-10-08 13:00:00", "DELIVERED", "Delivered", "Chennai")], "2026-10-08 18:00:00"),
+    });
+    stub.track.set(sAwb, {
+      status: 200,
+      body: trackBody(sAwb, "IN TRANSIT", [scan("2026-10-01 11:00:00", "PICKED UP", "Picked up", "Bengaluru"), scan("2026-10-02 09:00:00", "IN TRANSIT", "In transit", "Hosur")], "2026-10-04 18:00:00"),
+    });
+    const { notificationsOutbox } = m.schema;
+    const mine = m.orm.inArray(notificationsOutbox.orderId, [deliveredId, staleId]);
+
+    await m.sync.runTrackingSync({ trigger: "CRON", now: ist("2026-10-09 10:00:00"), notify: false, limit: 500 });
+    const [o] = await m.dbmod.db.select().from(m.schema.orders).where(m.orm.eq(m.schema.orders.id, deliveredId));
+    assert.equal(o.status, "DELIVERED", "backfill still brings the order up to date");
+    assert.ok((await openExceptions(staleId)).includes("EDD_EXPIRED"));
+    assert.equal(await count(notificationsOutbox, mine), 0, "nothing queued during backfill");
+
+    await m.sync.runTrackingSync({ trigger: "CRON", now: ist("2026-10-09 10:40:00"), limit: 500 });
+    assert.equal(await count(notificationsOutbox, mine), 0, "pre-existing conditions don't trigger emails afterwards");
+  });
+
   it("re-ship via Shiprocket clone: the cancelled order's new AWB is followed and flagged, the old AWB's late cancel can't override it", async () => {
     const oldAwb = `OLD${Date.now()}`;
     const newAwb = `NEW${Date.now()}`;

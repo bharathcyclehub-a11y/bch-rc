@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS shipment_tracking (
   CONSTRAINT shipment_tracking_kind_check CHECK (kind IN ('FORWARD', 'RETURN', 'REPLACEMENT'))
 );
 
+-- Shiprocket's own summary status and when it was reported (it outranks raw
+-- courier scan codes — see src/lib/tracking/derive.ts). Separate ADD COLUMN
+-- so databases that ran an earlier draft of this file get them too.
+ALTER TABLE shipment_tracking ADD COLUMN IF NOT EXISTS summary_status text;
+ALTER TABLE shipment_tracking ADD COLUMN IF NOT EXISTS summary_at timestamptz;
+
 CREATE UNIQUE INDEX IF NOT EXISTS shipment_tracking_awb_unique
   ON shipment_tracking (awb_code) WHERE awb_code IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS shipment_tracking_forward_unique

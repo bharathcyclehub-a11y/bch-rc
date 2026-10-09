@@ -35,7 +35,7 @@ regress it. Order status only ever moves forward (`canTrackingMoveOrder`).
 **Two behaviour changes worth knowing**
 - A courier **cancellation no longer cancels the order** or releases stock. It
   opens a `SHIPMENT_CANCELLED` exception (re-ship or cancel deliberately).
-  Reason: PRC-3RSJCZTY was re-shipped as a Shiprocket "-C" clone, the old code
+  Reason: in Oct 2026 an order was re-shipped as a Shiprocket "-C" clone, the old code
   cancelled the order and dropped the clone's events, and the parcel kept
   travelling while the order said CANCELLED.
 - Shiprocket clone ids (`PRC-XXXX-C`) match their base order, and the order's
