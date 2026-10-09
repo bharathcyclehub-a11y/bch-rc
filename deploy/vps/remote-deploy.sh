@@ -89,7 +89,7 @@ if [ "$INSTALL_CRONS" = "true" ]; then
   chmod +x "$CRON"
   printf '%s\n' "$current_tab" "$BEGIN" \
     "*/5 * * * * APP_DIR=$APP_DIR APP_PORT=$APP_PORT $CRON /api/cron/reconcile" \
-    "0 */3 * * * APP_DIR=$APP_DIR APP_PORT=$APP_PORT $CRON /api/cron/sync-shipments" \
+    "*/15 * * * * APP_DIR=$APP_DIR APP_PORT=$APP_PORT $CRON /api/cron/sync-shipments" \
     "10 * * * * APP_DIR=$APP_DIR APP_PORT=$APP_PORT $CRON /api/cron/analytics-snapshots" \
     "$END" | sed '/./,$!d' | crontab -
   log "crons installed"

@@ -20,6 +20,28 @@ const API = "https://apiv2.shiprocket.in/v1/external";
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
+/**
+ * A non-2xx answer from Shiprocket, with the HTTP status kept so callers can
+ * tell "refused / rate-limited" (401, 403, 429 — back off everything) from an
+ * ordinary failure. The message keeps the old `Shiprocket … → status: body`
+ * shape so existing log greps and error strings are unchanged.
+ */
+export class ShiprocketApiError extends Error {
+  readonly status: number;
+  readonly isAuth: boolean;
+  constructor(message: string, status: number, isAuth = false) {
+    super(message);
+    this.name = "ShiprocketApiError";
+    this.status = status;
+    this.isAuth = isAuth;
+  }
+}
+
+/** Drop the cached JWT so the next call logs in again (after a 401). */
+export function invalidateShiprocketToken(): void {
+  cachedToken = null;
+}
+
 async function getToken(): Promise<string> {
   if (cachedToken && Date.now() < cachedToken.expiresAt) {
     return cachedToken.token;
@@ -38,7 +60,7 @@ async function getToken(): Promise<string> {
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Shiprocket auth failed: ${res.status} ${body}`);
+    throw new ShiprocketApiError(`Shiprocket auth failed: ${res.status} ${body}`, res.status, true);
   }
 
   const data = (await res.json()) as { token: string };
@@ -65,9 +87,38 @@ async function srFetch<T>(
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`Shiprocket ${init.method} ${path} → ${res.status}: ${text}`);
+    throw new ShiprocketApiError(`Shiprocket ${init.method} ${path} → ${res.status}: ${text}`, res.status);
   }
   return JSON.parse(text) as T;
+}
+
+/**
+ * Raw tracking response for one shipment — by AWB when we have one (the
+ * courier-level record), else by Shiprocket shipment id. Parsed by
+ * src/lib/tracking/carrier.ts. A 401 refreshes the token and retries once.
+ * Shiprocket answers 200 with `track_status: 0` when there are no scans yet;
+ * that is a successful answer, not an error.
+ */
+export async function fetchShiprocketTracking(ref: {
+  awb?: string | null;
+  shipmentId?: string | null;
+}): Promise<unknown> {
+  const path = ref.awb
+    ? `/courier/track/awb/${encodeURIComponent(ref.awb)}`
+    : ref.shipmentId
+      ? `/courier/track/shipment/${encodeURIComponent(ref.shipmentId)}`
+      : null;
+  if (!path) throw new Error("fetchShiprocketTracking: need an AWB or shipment id");
+  const init = { method: "GET" as const, signal: AbortSignal.timeout(15_000) };
+  try {
+    return await srFetch<unknown>(path, init);
+  } catch (err) {
+    if (err instanceof ShiprocketApiError && err.status === 401 && !err.isAuth) {
+      invalidateShiprocketToken();
+      return srFetch<unknown>(path, { method: "GET", signal: AbortSignal.timeout(15_000) });
+    }
+    throw err;
+  }
 }
 
 /**

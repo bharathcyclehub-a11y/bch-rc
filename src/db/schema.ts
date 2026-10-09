@@ -24,6 +24,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -881,6 +882,9 @@ export const webhooksInbound = pgTable(
     processed: boolean("processed").notNull().default(false),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     error: text("error"),
+    /** Processing attempts — failed courier events are retried by the
+     *  tracking worker (migrations/manual/2026-10-09_shipment_tracking.sql). */
+    attempts: integer("attempts").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1028,6 +1032,178 @@ export const admins = pgTable("admins", {
 });
 
 // ============================================================
+// 13. SHIPMENT TRACKING — courier state per shipment (2026-10-09)
+// ============================================================
+// migrations/manual/2026-10-09_shipment_tracking.sql. `orders` stays the
+// canonical record of shipment CREATION (shiprocket ids, primary AWB);
+// these tables hold only what the courier reports afterwards. See
+// src/lib/tracking/ for the status model and the sync worker.
+
+export const shipmentTracking = pgTable(
+  "shipment_tracking",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id),
+    orderId: text("order_id")
+      .notNull()
+      .references(() => orders.id),
+    /** FORWARD (the order's own parcel) | RETURN | REPLACEMENT. */
+    kind: text("kind").notNull().default("FORWARD"),
+    shiprocketShipmentId: text("shiprocket_shipment_id"),
+    awbCode: text("awb_code"),
+    courierName: text("courier_name"),
+    /** Normalised TrackingStatus (src/lib/tracking/status.ts). */
+    status: text("status").notNull().default("AWAITING_AWB"),
+    /** Courier's own wording for the current status. */
+    statusLabel: text("status_label"),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    /** Courier scan time of the newest verified event — never our clock. */
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }),
+    lastEventActivity: text("last_event_activity"),
+    lastEventLocation: text("last_event_location"),
+    /** Expected delivery date and where it came from (COURIER only today). */
+    eddAt: timestamp("edd_at", { withTimezone: true }),
+    eddSource: text("edd_source"),
+    eddUpdatedAt: timestamp("edd_updated_at", { withTimezone: true }),
+    firstEddAt: timestamp("first_edd_at", { withTimezone: true }),
+    pickedUpAt: timestamp("picked_up_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    /** When the shipment reached a terminal status (delivered/RTO/cancelled). */
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+    deliveryAttempts: integer("delivery_attempts").notNull().default(0),
+    /** First successful snapshot. Customer notifications fire only after it,
+     *  so importing an in-flight backlog never messages old customers. */
+    baselineAt: timestamp("baseline_at", { withTimezone: true }),
+    /** false once the final post-delivery reconciliation is done. */
+    active: boolean("active").notNull().default(true),
+    nextSyncAt: timestamp("next_sync_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** Lease: a worker owns this row until then. */
+    syncLockedUntil: timestamp("sync_locked_until", { withTimezone: true }),
+    lastSyncAttemptAt: timestamp("last_sync_attempt_at", { withTimezone: true }),
+    lastSyncSuccessAt: timestamp("last_sync_success_at", { withTimezone: true }),
+    lastSyncError: text("last_sync_error"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    lastWebhookAt: timestamp("last_webhook_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("shipment_tracking_awb_unique")
+      .on(t.awbCode)
+      .where(sql`awb_code IS NOT NULL`),
+    uniqueIndex("shipment_tracking_forward_unique")
+      .on(t.orderId)
+      .where(sql`kind = 'FORWARD'`),
+    index("shipment_tracking_due_idx").on(t.active, t.nextSyncAt),
+    index("shipment_tracking_order_idx").on(t.orderId),
+  ],
+);
+
+export const shipmentTrackingEvents = pgTable(
+  "shipment_tracking_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trackingId: uuid("tracking_id")
+      .notNull()
+      .references(() => shipmentTracking.id),
+    orderId: text("order_id")
+      .notNull()
+      .references(() => orders.id),
+    awbCode: text("awb_code"),
+    /** WEBHOOK | POLL */
+    source: text("source").notNull(),
+    /** The courier's scan time (IST in their payload, stored as UTC). */
+    eventAt: timestamp("event_at", { withTimezone: true }).notNull(),
+    status: text("status").notNull(),
+    carrierStatusCode: text("carrier_status_code"),
+    carrierStatusLabel: text("carrier_status_label"),
+    activity: text("activity"),
+    location: text("location"),
+    /** Dedup key — the same scan from webhook + poll collapses to one row. */
+    fingerprint: text("fingerprint").notNull(),
+    raw: jsonb("raw").notNull().default({}),
+    receivedAt: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("shipment_tracking_events_fingerprint_unique").on(t.trackingId, t.fingerprint),
+    index("shipment_tracking_events_time_idx").on(t.trackingId, t.eventAt),
+  ],
+);
+
+export const deliveryExceptions = pgTable(
+  "delivery_exceptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id),
+    orderId: text("order_id")
+      .notNull()
+      .references(() => orders.id),
+    trackingId: uuid("tracking_id").references(() => shipmentTracking.id),
+    /** ExceptionType (src/lib/tracking/assess.ts). */
+    type: text("type").notNull(),
+    /** OPEN | ACKNOWLEDGED | RESOLVED */
+    status: text("status").notNull().default("OPEN"),
+    /** LOW | MEDIUM | HIGH | CRITICAL */
+    severity: text("severity").notNull().default("MEDIUM"),
+    detail: text("detail"),
+    context: jsonb("context").notNull().default({}),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    acknowledgedBy: text("acknowledged_by"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: text("resolved_by"),
+    resolution: text("resolution"),
+    ticketId: uuid("ticket_id"),
+    customerNotifiedAt: timestamp("customer_notified_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  // The partial unique index on (order_id, type, COALESCE(tracking_id, …))
+  // WHERE status <> 'RESOLVED' lives in the SQL migration only.
+  (t) => [index("delivery_exceptions_status_idx").on(t.status, t.openedAt)],
+);
+
+export const trackingSyncRuns = pgTable(
+  "tracking_sync_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** CRON | ADMIN | ADMIN_BULK */
+    trigger: text("trigger").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    claimed: integer("claimed").notNull().default(0),
+    succeeded: integer("succeeded").notNull().default(0),
+    failed: integer("failed").notNull().default(0),
+    changed: integer("changed").notNull().default(0),
+    webhooksRetried: integer("webhooks_retried").notNull().default(0),
+    skippedReason: text("skipped_reason"),
+    errors: jsonb("errors").notNull().default([]),
+  },
+  (t) => [index("tracking_sync_runs_started_idx").on(t.startedAt)],
+);
+
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedBy: text("updated_by"),
+});
+
+// ============================================================
 // Inferred types for app code
 // ============================================================
 
@@ -1062,3 +1238,6 @@ export type CheckoutLead = typeof checkoutLeads.$inferSelect;
 export type NewCheckoutLead = typeof checkoutLeads.$inferInsert;
 export type BargainSession = typeof bargainSessions.$inferSelect;
 export type NewBargainSession = typeof bargainSessions.$inferInsert;
+export type ShipmentTrackingRow = typeof shipmentTracking.$inferSelect;
+export type ShipmentTrackingEventRow = typeof shipmentTrackingEvents.$inferSelect;
+export type DeliveryExceptionRow = typeof deliveryExceptions.$inferSelect;
