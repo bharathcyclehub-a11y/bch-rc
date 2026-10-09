@@ -78,7 +78,7 @@ export default function OurStorySection() {
                   24 hrs
                 </p>
                 <p className="hidden sm:block text-xs text-white/60 mt-0.5">
-                  Same-day if before 4 PM
+                  COD: 24 hrs after our call
                 </p>
               </div>
               <div>

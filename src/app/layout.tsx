@@ -31,7 +31,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Mini RC Cars from ₹999 | PRC Cars",
     description:
-      "1:64 RC drift cars · LED · drift wheels · gift-ready box. Mini RC cars delivered pan-India in 24 hrs from Bangalore.",
+      "1:64 RC drift cars · LED · drift wheels · gift-ready box. Mini RC cars shipped pan-India, dispatched in 24 hrs from Bangalore.",
     url: "https://pocketrccars.com",
     siteName: "PRC Cars",
     locale: "en_IN",

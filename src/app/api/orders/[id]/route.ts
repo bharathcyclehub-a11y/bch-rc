@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
-import { orderEtaText } from "@/lib/serviceability";
+import { deliveryEstimateText } from "@/lib/tracking/view";
 import { rateLimit } from "@/lib/rate-limit";
 
 export async function GET(
@@ -39,9 +39,9 @@ export async function GET(
     ? `••••• ${String(addr.phone).slice(-4)}`
     : null;
 
-  // Delivery expectation — only meaningful before it's actually delivered.
-  const etaText =
-    order.status !== "DELIVERED" ? orderEtaText(addr?.pincode, order) : null;
+  // Delivery expectation — same source as /support/track and the order page,
+  // so every surface agrees (null once delivered or closed).
+  const etaText = await deliveryEstimateText(order);
 
   return NextResponse.json({
     id: order.id,

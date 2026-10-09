@@ -1,7 +1,10 @@
 import {
   Activity,
   BarChart3,
+  BookOpen,
   Filter,
+  Headphones,
+  Inbox,
   LayoutDashboard,
   LifeBuoy,
   Package,
@@ -10,15 +13,19 @@ import {
   Settings,
   ShoppingBag,
   Star,
+  TriangleAlert,
   Users,
   Wallet,
   type LucideIcon,
 } from "lucide-react";
 
-/** Live badge counts from the server layout (orders needing action, reviews to moderate). */
+/** Live badge counts from the server layout (orders needing action, reviews to
+ *  moderate, open shipment exceptions, open support tickets). */
 export type AdminCounts = {
   orders?: number;
   reviews?: number;
+  exceptions?: number;
+  tickets?: number;
 };
 
 export type NavItem = {
@@ -41,6 +48,15 @@ export const ADMIN_NAV: NavGroup[] = [
       { label: "Customers", href: "/admin/customers", icon: Users },
       { label: "Discounts", href: "/admin/discounts", icon: Percent },
       { label: "Reviews", href: "/admin/reviews", icon: Star, countKey: "reviews" },
+    ],
+  },
+  {
+    label: "Support",
+    items: [
+      { label: "Support", href: "/admin/support", icon: Headphones },
+      { label: "Tickets", href: "/admin/support/tickets", icon: Inbox, countKey: "tickets" },
+      { label: "Shipment exceptions", href: "/admin/support/exceptions", icon: TriangleAlert, countKey: "exceptions" },
+      { label: "Help articles", href: "/admin/support/articles", icon: BookOpen },
     ],
   },
   {
@@ -67,9 +83,17 @@ export const ADMIN_NAV: NavGroup[] = [
 
 export const ADMIN_NAV_ITEMS: NavItem[] = ADMIN_NAV.flatMap((g) => g.items);
 
-export function isNavActive(pathname: string, href: string): boolean {
+function matchesHref(pathname: string, href: string): boolean {
   if (href === "/admin") return pathname === "/admin";
   return pathname === href || pathname.startsWith(href + "/");
+}
+
+/** A nested item (/admin/support/tickets) wins over its parent (/admin/support). */
+export function isNavActive(pathname: string, href: string): boolean {
+  if (!matchesHref(pathname, href)) return false;
+  return !ADMIN_NAV_ITEMS.some(
+    (i) => i.href.startsWith(href + "/") && matchesHref(pathname, i.href),
+  );
 }
 
 export function activeNavItem(pathname: string): NavItem | undefined {

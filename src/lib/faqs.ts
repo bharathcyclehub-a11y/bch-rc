@@ -19,7 +19,7 @@ export const HOME_FAQS: QA[] = [
   },
   {
     q: "How do I save ₹100? (Online-pay bonus)",
-    a: "Pay online via UPI / card / netbanking and you instantly get ₹100 off + same-day dispatch from Bangalore (COD orders wait for a verification call before they leave the warehouse). Either way, your order ships pan-India.",
+    a: "Pay online via UPI / card / netbanking and you instantly get ₹100 off + dispatch within 24 hrs from Bangalore (COD orders wait for a verification call before they leave the warehouse). Either way, your order ships pan-India.",
   },
   {
     q: "What if it arrives broken or stops working?",
