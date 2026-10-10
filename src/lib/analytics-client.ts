@@ -11,8 +11,8 @@
  *
  * The functions in this module are no-ops if:
  *  - the user hasn't accepted consent (the banner sets prc_consent=accepted)
- *  - the relevant env var (NEXT_PUBLIC_GA_ID / NEXT_PUBLIC_META_PIXEL_ID)
- *    isn't set
+ *  - the tag isn't loaded (GA4 loads only in production builds; the Pixel
+ *    needs NEXT_PUBLIC_META_PIXEL_ID)
  *  - the call is happening on the server (typeof window === "undefined")
  *
  * So mounting <Analytics /> at the layout root is safe even before Syed
