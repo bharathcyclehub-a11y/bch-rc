@@ -34,16 +34,22 @@ import { trackFunnel } from "@/lib/funnel-client";
 
 const CONSENT_KEY = "prc_consent";
 
+// GA4 measurement ID for pocketrccars.com. It is public (it ships in every
+// page's HTML), so it lives here rather than in NEXT_PUBLIC_GA_ID: a BOM and a
+// literal "\r" in that secret kept GA off from Sep to Oct 2026.
+const GA_MEASUREMENT_ID = "G-2NEX5VBK8H";
+
 export default function Analytics() {
   // Sanitize analytics IDs from env. A stray newline/space in an env value
   // (common when it's piped in from a shell) corrupts the gtag script URL, and
   // next/script then builds an invalid `querySelector` from it and throws —
-  // which is the "not a valid selector" crash. Strip all whitespace, and for GA
-  // require a clean measurement-ID shape; anything unexpected is treated as
+  // which is the "not a valid selector" crash. Strip all whitespace, BOMs,
+  // stray quotes and literal "\r"/"\n"/"\t" escapes (dotenv leaves "\r" as
+  // text), then require a clean ID shape; anything unexpected is treated as
   // unset so a bad value can never take down the page.
-  const strip = (v: string | undefined) => v?.replace(/[\s\u200B-\u200D\u2060\uFEFF]+/g, "") || undefined;
-  const rawGa = strip(process.env.NEXT_PUBLIC_GA_ID);
-  const gaId = rawGa && /^G-[A-Z0-9]+$/.test(rawGa) ? rawGa : undefined;
+  const strip = (v: string | undefined) => v?.replace(/\\[rnt]|["'\s\u200B-\u200D\u2060\uFEFF]+/g, "") || undefined;
+  // Production builds only, so local dev never sends hits to the live property.
+  const gaId = process.env.NODE_ENV === "production" ? GA_MEASUREMENT_ID : undefined;
   const rawPixel = strip(process.env.NEXT_PUBLIC_META_PIXEL_ID);
   const pixelId = rawPixel && /^\d+$/.test(rawPixel) ? rawPixel : undefined;
   const rawClarity = strip(process.env.NEXT_PUBLIC_CLARITY_ID);
@@ -107,7 +113,7 @@ export default function Analytics() {
   return (
     <>
       {/* Google Analytics 4 (gtag.js) + Consent Mode v2 — loads for everyone
-          when NEXT_PUBLIC_GA_ID is set. The consent default is read from
+          in production builds. The consent default is read from
           localStorage so returning consenters start "granted"; everyone else
           starts "denied" (cookieless modeled data). */}
       {gaId && (
