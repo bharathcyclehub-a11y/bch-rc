@@ -221,7 +221,7 @@ function shippingBlockText(p: EmailPayload): string {
  *  dispatch. Both confirmation emails carry this. */
 function editWindowBlock(): string {
   return `<div style="background:#fff8e1;border-radius:12px;padding:12px 14px;margin:12px 0;font-size:13px;color:#5a4a00">
-<b>Need to change colour or address?</b> WhatsApp <a href="https://wa.me/91${SUPPORT_PHONE.replace(/\D/g, "")}" style="color:#5a4a00">${SUPPORT_PHONE}</a> within 2 hrs of placing your order. After that, we've already handed it to the courier.
+<b>Need to change colour or address?</b> WhatsApp <a href="https://wa.me/${SUPPORT_PHONE.replace(/\D/g, "")}" style="color:#5a4a00">${SUPPORT_PHONE}</a> within 2 hrs of placing your order. After that, we've already handed it to the courier.
 </div>`;
 }
 

@@ -20,6 +20,7 @@ import { ShipButton } from "./ShipButton";
 import OrderActions from "./OrderActions";
 import CodVerifyActions from "./CodVerifyActions";
 import FulfillmentPanel from "./FulfillmentPanel";
+import { TrackingPanel } from "./TrackingPanel";
 import type { FulfillmentTarget } from "./actions";
 
 /** Forward-only fulfilment targets still available from the current status. */
@@ -290,6 +291,9 @@ export default async function AdminOrderDetail({
               </div>
             )}
           </div>
+
+          {/* Courier tracking: status, last scan, estimate, sync health, exceptions, timeline */}
+          <TrackingPanel orderId={order.id} />
 
           {/* Payment refs — method/status already sit in the header badge and
               the Razorpay ids are look-up data, so on mobile the whole card

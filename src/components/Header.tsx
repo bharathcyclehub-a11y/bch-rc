@@ -104,6 +104,7 @@ export default function Header() {
                 alt={THEME.brandName}
                 width={826}
                 height={304}
+                sizes="(min-width: 1024px) 153px, (min-width: 640px) 131px, 109px"
                 className="h-10 sm:h-12 lg:h-14 w-auto"
                 priority
               />

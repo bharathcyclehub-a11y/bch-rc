@@ -16,7 +16,7 @@ import { WhatsAppIcon } from "@/components/BrandIcons";
 import { THEME } from "@/lib/theme";
 import { waLink, OFFERS, bundleDiscountInr, bundleTierLabel } from "@/lib/config";
 import { formatINR, formatIST } from "@/lib/utils";
-import { orderEtaText } from "@/lib/serviceability";
+import { deliveryEstimateText } from "@/lib/tracking/view";
 import { db } from "@/db";
 import { orders } from "@/db/schema";
 
@@ -64,7 +64,10 @@ export default async function OrderSuccessPage({
   const maskedPhone = shippingAddr?.phone
     ? `••••• ${String(shippingAddr.phone).slice(-4)}`
     : null;
-  const etaText = orderEtaText(shippingAddr?.pincode, order);
+  // Same wording as /support/track, so no surface promises a date the
+  // tracking page has already called expired.
+  const etaText = await deliveryEstimateText(order);
+  const etaDelayed = etaText?.startsWith("delayed") ?? false;
   const paidAtText = order.paidAt
     ? formatIST(order.paidAt, {
         day: "numeric",
@@ -157,7 +160,9 @@ export default async function OrderSuccessPage({
             {etaText && order.status !== "DELIVERED" && (
               <p className="mt-4 inline-flex items-center justify-center gap-1.5 text-sm text-brand-ink">
                 <Truck size={15} className="text-brand-red" aria-hidden />
-                Estimated delivery {etaText}
+                {etaDelayed
+                  ? "Delivery delayed — updated estimate pending"
+                  : `Estimated delivery ${etaText}`}
               </p>
             )}
 
@@ -384,7 +389,7 @@ export default async function OrderSuccessPage({
           {/* CTAs */}
           <div className="mt-6 flex flex-col sm:flex-row gap-3">
             <Link
-              href={`/track?id=${order.id}`}
+              href={`/support/track?id=${order.id}`}
               className="flex-1 inline-flex items-center justify-center gap-2 bg-brand-ink text-white px-5 py-3 rounded-xl font-semibold hover:bg-brand-ink-soft transition-colors"
             >
               <Package size={16} /> Track order

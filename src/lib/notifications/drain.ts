@@ -38,6 +38,18 @@ async function dispatchRow(
   dedupKey: string | null,
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   try {
+    // Customer notices (customer-notice.ts) arrive pre-rendered.
+    if ((template as string) === "CUSTOMER_NOTICE") {
+      const n = payload as unknown as { to: string; toPhone: string | null; subject: string; html: string; text: string; whatsapp: string };
+      if (channel === "whatsapp") return await sendWhatsApp({ toPhone: n.toPhone ?? "", text: n.whatsapp });
+      return await sendEmail({
+        to: n.to,
+        subject: n.subject,
+        html: n.html,
+        text: n.text,
+        idempotencyKey: dedupKey ?? undefined,
+      });
+    }
     if (channel === "whatsapp") {
       const { text } = renderWhatsApp(template, payload);
       return await sendWhatsApp({ toPhone: payload.toPhone ?? "", text });

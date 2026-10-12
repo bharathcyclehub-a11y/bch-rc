@@ -1,6 +1,8 @@
-import { sql } from "drizzle-orm";
+import { and, count, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
+import { deliveryExceptions, supportTickets } from "@/db/schema";
 import { requireAdmin } from "@/lib/admin-auth";
+import { OPEN_STATUSES } from "@/lib/support/rules";
 import { THEME } from "@/lib/theme";
 import { AdminShell, type AdminCounts } from "./AdminShell";
 
@@ -39,9 +41,12 @@ export default async function AdminLayout({
  * no badges rather than throwing).
  *   • orders  = orders needing action (COD to verify + paid-but-unshipped)
  *   • reviews = reviews awaiting moderation
+ *   • exceptions = OPEN delivery exceptions (separate query — see below)
  */
 async function loadNavCounts(siteIds: string[]): Promise<AdminCounts> {
   if (siteIds.length === 0) return {};
+  const exceptions = countOpenExceptions(siteIds);
+  const tickets = countTicketsNeedingStaff(siteIds);
   try {
     const siteLiteral = sql`array[${sql.join(
       siteIds.map((s) => sql`${s}`),
@@ -59,8 +64,46 @@ async function loadNavCounts(siteIds: string[]): Promise<AdminCounts> {
     return {
       orders: r?.open_orders ?? 0,
       reviews: r?.pending_reviews ?? 0,
+      exceptions: await exceptions,
+      tickets: await tickets,
     };
   } catch {
-    return {};
+    return { exceptions: await exceptions, tickets: await tickets };
+  }
+}
+
+/** Open support tickets waiting on staff. Same never-rejects rule as above. */
+async function countTicketsNeedingStaff(siteIds: string[]): Promise<number | undefined> {
+  try {
+    const [r] = await db
+      .select({ n: count() })
+      .from(supportTickets)
+      .where(
+        and(
+          inArray(supportTickets.status, [...OPEN_STATUSES]),
+          eq(supportTickets.awaiting, "STAFF"),
+          inArray(supportTickets.siteId, siteIds),
+        ),
+      );
+    return r?.n ?? 0;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Open shipment exceptions. Its own query because delivery_exceptions comes
+ * from a manual migration that may not be applied yet — a missing table must
+ * cost only this badge (undefined), never the others. Never rejects.
+ */
+async function countOpenExceptions(siteIds: string[]): Promise<number | undefined> {
+  try {
+    const [r] = await db
+      .select({ n: count() })
+      .from(deliveryExceptions)
+      .where(and(eq(deliveryExceptions.status, "OPEN"), inArray(deliveryExceptions.siteId, siteIds)));
+    return r?.n ?? 0;
+  } catch {
+    return undefined;
   }
 }
