@@ -14,7 +14,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import sharp from "sharp";
 import { createAdminClient } from "@/lib/supabase/server";
 
 export const EVIDENCE_BUCKET = "support-evidence";
@@ -40,6 +39,16 @@ export async function storeEvidence(file: File, ticketId: string): Promise<Store
   let mimeType: string;
   let ext: string;
   if (IMAGE_TYPES.has(file.type)) {
+    // Loaded on demand, not at import: a broken native `sharp` install must
+    // only affect photo uploads — never tickets, chat or the tracking cron,
+    // which all import this module (12 Oct 2026: a VPS-built bundle whose
+    // sharp didn't load took all of them down).
+    let sharp: typeof import("sharp").default;
+    try {
+      sharp = (await import("sharp")).default;
+    } catch {
+      throw new EvidenceError("Photo uploads are temporarily unavailable — please send a video or try again later.");
+    }
     try {
       body = await sharp(Buffer.from(await file.arrayBuffer()))
         .rotate()

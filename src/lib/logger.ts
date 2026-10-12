@@ -12,7 +12,10 @@ type LogContext = Record<string, string | number | boolean | null | undefined>;
 
 function safeMessage(err: unknown): { message: string; stack?: string } {
   if (err instanceof Error) {
-    return { message: err.message, stack: err.stack };
+    // Drizzle wraps driver errors ("Failed query: …") and keeps the real
+    // Postgres / connection reason on `cause` — without it the log is useless.
+    const cause = err.cause instanceof Error ? ` | cause: ${err.cause.message}` : "";
+    return { message: `${err.message}${cause}`, stack: err.stack };
   }
   if (typeof err === "string") return { message: err };
   try {
