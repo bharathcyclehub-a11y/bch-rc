@@ -18,7 +18,10 @@ const NAV_BEFORE = [
   { label: "Shop", href: "/#hub-shop" },
   { label: "Bundles", href: "/#bundles" },
 ];
-const NAV_AFTER = [{ label: "Track Order", href: "/track" }];
+const NAV_AFTER = [
+  { label: "Track Order", href: "/track" },
+  { label: "Support", href: "/support" },
+];
 
 export default function Header() {
   const items = useCart((s) => s.items);
