@@ -10,9 +10,10 @@
  * SURFACE option when one exists (air only where surface is unavailable), as
  * getCheapestSurfaceCourierId has always done — or the cheapest of all when
  * `shiprocketSurfacePreferred` is off. Shiprocket's `rate` is freight + COD +
- * other charges; whether it includes GST is not stated by the API, so the
- * quote is marked taxIncluded: null / confidence "partial" and never wins a
- * cost comparison against a full quote.
+ * other charges, and is what it bills (billed freight equals the quote). The
+ * API doesn't say whether GST is on top, so the quote is "partial" (never
+ * decides on cost) until ops set `shiprocketRatesGst`: "included" makes it a
+ * full quote as-is, "excluded" adds 18% GST first.
  */
 
 import {
@@ -86,18 +87,21 @@ export const shiprocketAdapter: CourierAdapter = {
     const pool = settings.shiprocketSurfacePreferred && surface.length > 0 ? surface : options;
     const pick = [...pool].sort((a, b) => Number(a.rate) - Number(b.rate))[0];
     const other = (paise(pick.coverage_charges) ?? 0) + (paise(pick.other_charges) ?? 0);
+    const rate = paise(pick.rate)!;
+    const gst = settings.shiprocketRatesGst;
+    const total = gst === "excluded" ? Math.round(rate * 1.18) : rate;
     return {
       provider: "shiprocket",
-      totalPaise: paise(pick.rate)!,
-      taxIncluded: null,
-      confidence: "partial",
+      totalPaise: total,
+      taxIncluded: gst === "unknown" ? null : true,
+      confidence: gst === "unknown" ? "partial" : "full",
       components: {
         freightPaise: paise(pick.freight_charge),
         codPaise: paise(pick.cod_charges),
         fuelPaise: null,
         remoteAreaPaise: null,
         otherPaise: other || null,
-        taxPaise: null,
+        taxPaise: gst === "excluded" ? total - rate : null,
       },
       courierName: pick.courier_name?.trim() || null,
       mode: isSurface(pick) ? "surface" : "air",

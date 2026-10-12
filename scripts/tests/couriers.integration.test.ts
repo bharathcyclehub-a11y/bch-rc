@@ -539,6 +539,31 @@ describe("courier booking (integration)", () => {
     const c = await makeOrder();
     assert.equal((await run(c)).result.courierProvider, "delhivery", "recovered");
   });
+
+  it("cheaper-only: Shiprocket's GST basis set → like-for-like comparison; unknown → no cost decision", async () => {
+    stub.dlvLookup = "ok";
+    stub.dlvCreate = "ok";
+    // Shiprocket's cheapest surface rate is ₹95; "excluded" adds 18% → ₹112.10 vs Delhivery ₹90.52 incl. GST.
+    await routing({ mode: "auto", delhiveryEnabled: true, requireCheaper: true, shiprocketRatesGst: "excluded" });
+    const a = await makeOrder();
+    assert.equal((await run(a)).result.courierProvider, "delhivery");
+    const da = (await orderRow(a)).courierRouting.decision;
+    const sr = da.assessments.find((x: any) => x.provider === "shiprocket").quote;
+    assert.equal(sr.totalPaise, 11210);
+    assert.equal(sr.taxIncluded, true);
+    assert.equal(sr.confidence, "full");
+    assert.equal(da.reasonCode, "PREFERRED_CHEAPER");
+    assert.equal(da.comparable, true);
+    assert.equal(da.savingsPaise, 11210 - 9052);
+
+    await routing({ mode: "auto", delhiveryEnabled: true, requireCheaper: true });
+    const b = await makeOrder();
+    await run(b);
+    const db2 = (await orderRow(b)).courierRouting.decision;
+    assert.equal(db2.comparable, false);
+    assert.equal(db2.reasonCode, "PREFERRED_COST_UNVERIFIED");
+    assert.equal(db2.savingsPaise, null);
+  });
 });
 
 // ---- Delhivery tracking --------------------------------------------------------

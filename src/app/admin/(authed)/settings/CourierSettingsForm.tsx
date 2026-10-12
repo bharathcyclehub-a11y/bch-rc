@@ -293,6 +293,24 @@ export function CourierSettingsForm({
             description="Air only where surface is unavailable — how staff choose by hand today."
           />
         </div>
+        <div className="mt-4 max-w-sm">
+          <Field
+            label="Shiprocket quotes and GST"
+            htmlFor="cr-sr-gst"
+            hint="Check one AWB in Shiprocket's wallet passbook: debit = quote → included; 18% more → excluded. Unknown keeps Shiprocket out of cost comparisons."
+          >
+            <Select
+              id="cr-sr-gst"
+              value={d.shiprocketRatesGst}
+              disabled={off}
+              onChange={(e) => set("shiprocketRatesGst", e.target.value as Draft["shiprocketRatesGst"])}
+            >
+              <option value="unknown">Unknown</option>
+              <option value="included">Quote includes GST</option>
+              <option value="excluded">GST added on top (+18%)</option>
+            </Select>
+          </Field>
+        </div>
       </Group>
 
       <Group title="Parcel (as billed)">

@@ -59,6 +59,12 @@ export const courierSettingsSchema = z.object({
   /** Price Shiprocket by its cheapest SURFACE courier when one exists (air
    *  only where surface is unavailable) — how staff choose by hand today. */
   shiprocketSurfacePreferred: z.boolean(),
+  /** Whether Shiprocket's quoted `rate` includes 18% GST. Its API doesn't say
+   *  (its billed freight equals the quote to the paisa, checked 13 Oct 2026),
+   *  so ops confirm it once from the wallet passbook: "included" when an
+   *  AWB's debit equals the quote, "excluded" when it is 18% more. Until then
+   *  Shiprocket quotes stay "partial" and never decide on cost. */
+  shiprocketRatesGst: z.enum(["unknown", "included", "excluded"]),
   /** Orders above this value (₹) always wait for staff. null = never. */
   reviewAboveInr: z.number().int().min(100).max(1_000_000).nullable(),
   /** The packed parcel, as billed. Today every order ships in one polybag. */
@@ -87,6 +93,7 @@ export const DEFAULT_COURIER_SETTINGS: CourierSettings = {
   shiprocketCod: true,
   delhiveryModes: ["Surface"],
   shiprocketSurfacePreferred: true,
+  shiprocketRatesGst: "unknown",
   reviewAboveInr: null,
   // The 7×10 in tamper-proof polybag (see createShipment in src/lib/shiprocket.ts).
   parcel: { weightGrams: 300, lengthCm: 25, breadthCm: 18, heightCm: 4 },
