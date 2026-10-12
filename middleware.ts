@@ -34,6 +34,7 @@ import {
   shouldTrackPath,
   isBotUA,
 } from "./src/lib/analytics";
+import { selfOrigin } from "./src/lib/request-origin";
 
 // MAINTENANCE MODE — gated by env var. Runs BEFORE Supabase/analytics so a
 // paused site doesn't waste a DB round-trip on every request. Toggle via
@@ -278,7 +279,7 @@ function trackPageview(
   // Fire-and-forget, server-to-server. waitUntil keeps the function alive until
   // the POST resolves without delaying the user's response.
   event.waitUntil(
-    fetch(`${url.origin}/api/track`, {
+    fetch(`${selfOrigin(request)}/api/track`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
