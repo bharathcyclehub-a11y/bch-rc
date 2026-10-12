@@ -16,11 +16,14 @@ import { formatINR, formatIST } from "@/lib/utils";
 import { OrderStatusBadge } from "@/components/admin/Badge";
 import { OFFERS, bundleDiscountInr, bundleTierLabel } from "@/lib/config";
 import { orderConfirmationWaLink } from "@/lib/wa";
+import { asCourierProvider, COURIER_PROVIDER_LABEL, courierBookingRef } from "@/lib/couriers";
+import { readRoutingState } from "@/lib/couriers/routing-state";
 import { ShipButton } from "./ShipButton";
 import OrderActions from "./OrderActions";
 import CodVerifyActions from "./CodVerifyActions";
 import FulfillmentPanel from "./FulfillmentPanel";
 import { TrackingPanel } from "./TrackingPanel";
+import { CourierPanel } from "./CourierPanel";
 import type { FulfillmentTarget } from "./actions";
 
 /** Forward-only fulfilment targets still available from the current status. */
@@ -99,6 +102,8 @@ export default async function AdminOrderDetail({
 
   const items = order.items as OrderItem[];
   const addr = order.shippingAddress as Record<string, string>;
+  // Shiprocket order id, or the Delhivery waybill (Delhivery has no order id).
+  const bookingRef = courierBookingRef(order);
 
   const currentRank = FULFILLMENT_RANK[order.status] ?? 0;
   const nextTargets: FulfillmentTarget[] =
@@ -268,9 +273,13 @@ export default async function AdminOrderDetail({
           <div className="bg-white rounded-2xl border border-brand-line p-3 sm:p-5">
             <h2 className="font-semibold text-brand-ink mb-2 sm:mb-3 text-sm sm:text-base">Fulfillment</h2>
             <dl className="text-[13px] sm:text-sm grid sm:grid-cols-2 gap-x-6 gap-y-1 sm:gap-y-1.5">
-              {/* Shiprocket ref + Method (already in the header badge) are
-                  desktop-only — mobile keeps just AWB + courier */}
-              <Field label="Shiprocket" value={order.shiprocketOrderId} className="hidden sm:flex" />
+              {/* Booking ref (labelled with the provider that holds it) + Method
+                  (already in the header badge) are desktop-only — mobile keeps
+                  just AWB + courier */}
+              {/* A Delhivery booking's ref IS its AWB — shown once, below. */}
+              {asCourierProvider(order.courierProvider) !== "delhivery" && (
+                <Field label={COURIER_PROVIDER_LABEL[asCourierProvider(order.courierProvider)]} value={bookingRef} className="hidden sm:flex" />
+              )}
               <Field label="AWB" value={order.awbCode} mono />
               <Field label="Courier" value={order.courierName} />
               <Field label="Method" value={order.paymentMethod} className="hidden sm:flex" />
@@ -285,12 +294,16 @@ export default async function AdminOrderDetail({
                 Courier tracking <ExternalLink size={12} />
               </a>
             )}
-            {(order.status === "PAID" || (order.status === "PACKED" && !order.awbCode)) && (
+            {/* A held order is booked from the Courier panel (staff pick the provider). */}
+            {(order.status === "PAID" || (order.status === "PACKED" && !order.awbCode)) && !readRoutingState(order.courierRouting).held && (
               <div className="pt-3 mt-3 border-t border-brand-line">
-                <ShipButton orderId={order.id} hasShipment={!!order.shiprocketOrderId} />
+                <ShipButton orderId={order.id} hasShipment={!!bookingRef} />
               </div>
             )}
           </div>
+
+          {/* Courier booking: provider, routing verdict, quoted vs billed, staff controls */}
+          <CourierPanel order={order} />
 
           {/* Courier tracking: status, last scan, estimate, sync health, exceptions, timeline */}
           <TrackingPanel orderId={order.id} />

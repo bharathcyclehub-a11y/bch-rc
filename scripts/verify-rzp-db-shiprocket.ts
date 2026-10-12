@@ -1,9 +1,13 @@
 /**
- * READ-ONLY 3-way check: Razorpay captured payments → DB order → Shiprocket order.
+ * READ-ONLY 3-way check: Razorpay captured payments → DB order → courier booking.
  *
  * For every CAPTURED Razorpay payment in the window, confirms the order row
- * exists in the DB in a paid state, and that the order exists in Shiprocket
- * (by the shiprocket_order_id stored on the row). Makes NO changes.
+ * exists in the DB in a paid state, and that its shipment exists on the
+ * courier that booked it (orders.courier_provider):
+ *   - shiprocket: the order exists in Shiprocket (by shiprocket_order_id);
+ *   - delhivery:  the waybill (awb_code) exists on Delhivery and carries our
+ *                 order id as its reference; its current status is shown.
+ * Makes NO changes.
  *   Run: npx tsx --env-file=.env.prod scripts/verify-rzp-db-shiprocket.ts [days]
  */
 import { db } from "../src/db";
@@ -25,6 +29,11 @@ const DAYS = Number(process.argv[2] || 14);
 const to = Math.floor(Date.now() / 1000);
 const from = to - DAYS * 86400;
 const SR = "https://apiv2.shiprocket.in/v1/external";
+// Same host choice as src/lib/couriers/delhivery.ts.
+const DLV =
+  (process.env.DELHIVERY_ENV ?? "").trim().toLowerCase() === "staging"
+    ? "https://staging-express.delhivery.com"
+    : "https://track.delhivery.com";
 
 async function fetchAllPayments(): Promise<Pay[]> {
   const all: Pay[] = [];
@@ -63,6 +72,34 @@ async function srOrder(token: string, id: string) {
   };
 }
 
+/** A Delhivery shipment by waybill (tracking API). Delhivery answers 200 with
+ *  `{ Error }` for an unknown waybill, so the body is checked, not the status. */
+async function dlvShipment(awb: string, orderId: string) {
+  const token = (process.env.DELHIVERY_API_TOKEN ?? "").replace(/^﻿/, "").trim();
+  if (!token) return { found: false, refOk: false, detail: "DELHIVERY_API_TOKEN not set" };
+  await new Promise((r) => setTimeout(r, 300)); // stay well under the tracking rate limit
+  const res = await fetch(`${DLV}/api/v1/packages/json/?waybill=${encodeURIComponent(awb)}`, {
+    headers: { Accept: "application/json", Authorization: `Token ${token}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) return { found: false, refOk: false, detail: `HTTP ${res.status}` };
+  type Resp = {
+    Error?: string;
+    ShipmentData?: Array<{
+      Shipment?: { AWB?: string | number; ReferenceNo?: string; Status?: { Status?: string; StatusType?: string } };
+    }>;
+  };
+  const d = (await res.json().catch(() => ({}))) as Resp;
+  const sh = d.ShipmentData?.find((x) => String(x.Shipment?.AWB ?? "").trim() === awb)?.Shipment;
+  if (!sh) return { found: false, refOk: false, detail: d.Error ? String(d.Error).slice(0, 80) : "no shipment data" };
+  const ref = String(sh.ReferenceNo ?? "").trim();
+  return {
+    found: true,
+    refOk: ref === orderId,
+    detail: `${sh.Status?.Status ?? "?"} (${sh.Status?.StatusType ?? "?"}) | ref=${ref || "-"}`,
+  };
+}
+
 const PAID_OK = new Set(["PAID", "PACKED", "SHIPPED", "DELIVERED", "PENDING_COD_VERIFICATION"]);
 
 async function main() {
@@ -81,6 +118,7 @@ async function main() {
           totalInr: orders.totalInr,
           confirmationFeeInr: orders.confirmationFeeInr,
           razorpayOrderId: orders.razorpayOrderId,
+          courierProvider: orders.courierProvider,
           shiprocketOrderId: orders.shiprocketOrderId,
           awbCode: orders.awbCode,
         })
@@ -106,15 +144,28 @@ async function main() {
     const probs: string[] = [];
     if (!PAID_OK.has(o.status)) probs.push(`DB status ${o.status}/${o.paymentStatus}`);
     if (p.amount !== expected * 100) probs.push(`amount paid ${amt} ≠ expected ₹${expected}`);
-    let sr = "no shiprocket_order_id";
-    if (o.shiprocketOrderId) {
-      const r = await srOrder(token, o.shiprocketOrderId);
-      sr = r.detail;
-      if (!r.found) probs.push(`Shiprocket order ${o.shiprocketOrderId} not found (${r.detail})`);
-    } else probs.push("not pushed to Shiprocket");
+    let courier: string;
+    if (o.courierProvider === "delhivery") {
+      let dl = "no awb_code";
+      if (o.awbCode) {
+        const r = await dlvShipment(o.awbCode, o.id);
+        dl = r.detail;
+        if (!r.found) probs.push(`Delhivery waybill ${o.awbCode} not found (${r.detail})`);
+        else if (!r.refOk) probs.push(`Delhivery waybill ${o.awbCode} is not referenced to this order (${r.detail})`);
+      } else probs.push("not booked with any courier");
+      courier = `DLV ${o.awbCode ?? "-"}: ${dl}`;
+    } else {
+      let sr = "no shiprocket_order_id";
+      if (o.shiprocketOrderId) {
+        const r = await srOrder(token, o.shiprocketOrderId);
+        sr = r.detail;
+        if (!r.found) probs.push(`Shiprocket order ${o.shiprocketOrderId} not found (${r.detail})`);
+      } else probs.push("not booked with any courier");
+      courier = `SR ${o.shiprocketOrderId ?? "-"}: ${sr}`;
+    }
 
     console.log(
-      `${probs.length ? "✗" : "✓"} ${when} ${o.id} ${amt} ${o.paymentMethod} DB=${o.status} | SR ${o.shiprocketOrderId ?? "-"}: ${sr}`,
+      `${probs.length ? "✗" : "✓"} ${when} ${o.id} ${amt} ${o.paymentMethod} DB=${o.status} | ${courier}`,
     );
     if (probs.length) issues.push(`${o.id}: ${probs.join("; ")}`);
     else allGood++;

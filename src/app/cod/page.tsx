@@ -9,6 +9,7 @@ import {
 } from "drizzle-orm";
 import { db } from "@/db";
 import { events, orders } from "@/db/schema";
+import { orderListColumns } from "@/db/order-columns";
 import { isCodAuthenticated } from "@/lib/cod-auth";
 import { CodLoginForm } from "./CodLoginForm";
 import { CodOrderCard } from "./CodOrderCard";
@@ -77,16 +78,16 @@ async function loadTabData(tab: Tab) {
     countOf(approvedFilter),
     countOf(rejectedFilter),
     tab === "pending"
-      ? db.select().from(orders).where(pendingFilter).orderBy(asc(orders.placedAt))
+      ? db.select(orderListColumns).from(orders).where(pendingFilter).orderBy(asc(orders.placedAt))
       : tab === "approved"
         ? db
-            .select()
+            .select(orderListColumns)
             .from(orders)
             .where(approvedFilter)
             .orderBy(desc(orders.paidAt))
             .limit(LIST_LIMIT)
         : db
-            .select()
+            .select(orderListColumns)
             .from(orders)
             .where(rejectedFilter)
             .orderBy(desc(orders.cancelledAt))

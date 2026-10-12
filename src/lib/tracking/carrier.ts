@@ -189,6 +189,172 @@ export function parseShiprocketWebhook(body: ShiprocketWebhook): CarrierSnapshot
   };
 }
 
+// ── Delhivery (direct) ─────────────────────────────────────────────────────
+
+/**
+ * Delhivery's (StatusType, Status, NSL code) → a label normalizeCarrierStatus
+ * understands. Delhivery's own words don't survive the shared normaliser:
+ * "Dispatched" means OUT FOR DELIVERY (not "dispatched from origin"), a failed
+ * attempt is "Pending" with an end-of-day EOD-* code, and every RT/* status is
+ * the return-to-origin leg. The raw values stay on the event (code, raw).
+ *
+ *   UD Manifested / Not Picked      → awaiting pickup
+ *   UD In Transit                   → in transit
+ *   UD Pending + EOD-* (not EOD-38) → failed delivery attempt (NDR)
+ *   UD Pending (otherwise)          → in transit (at the destination hub)
+ *   UD Dispatched                   → out for delivery
+ *   DL Delivered                    → delivered
+ *   RT In Transit/Pending/Dispatched→ RTO in transit
+ *   DL RTO                          → RTO delivered (back with us)
+ *   CN Canceled/Closed              → cancelled (reverse pickups only — a
+ *                                     forward cancel before pickup stays
+ *                                     "Manifested"; we record those ourselves)
+ *   LT Lost                         → lost (exception)
+ */
+export function delhiveryLabel(
+  statusType: string | null,
+  status: string | null,
+  code: string | null,
+): string | null {
+  const t = (statusType ?? "").toUpperCase().trim();
+  const s = (status ?? "").trim();
+  const S = s.toUpperCase();
+  if (!t && !s) return null;
+  if (t === "DL") {
+    if (S.includes("RTO")) return "RTO Delivered";
+    if (S.includes("DTO")) return "Delivered";
+    return "Delivered";
+  }
+  if (t === "RT") return S === "DISPATCHED" ? "RTO Out for Delivery" : `RTO ${s || "In Transit"}`;
+  if (t === "CN") return "Cancelled";
+  if (t === "LT" || S === "LOST") return "Lost";
+  if (t === "PP") return S === "DISPATCHED" ? "Out for Pickup" : "Pickup Scheduled";
+  switch (S) {
+    case "MANIFESTED":
+      return "Manifested";
+    case "NOT PICKED":
+      return "Not Picked";
+    case "IN TRANSIT":
+      return "In Transit";
+    case "DISPATCHED":
+      return "Out for Delivery";
+    case "PENDING": {
+      const c = (code ?? "").toUpperCase();
+      return c.startsWith("EOD-") && c !== "EOD-38" ? "Undelivered" : "In Transit";
+    }
+    case "DELIVERED":
+      return "Delivered";
+    default:
+      return s || null;
+  }
+}
+
+function parseDelhiveryScan(raw: unknown): CarrierScan | null {
+  if (!isObj(raw)) return null;
+  const d = isObj(raw.ScanDetail) ? (raw.ScanDetail as Obj) : raw;
+  const at = parseCarrierTime(d.ScanDateTime ?? d.StatusDateTime);
+  if (!at) return null;
+  const code = str(d.StatusCode);
+  return {
+    at,
+    code: code ?? str(d.ScanType),
+    label: delhiveryLabel(str(d.ScanType), str(d.Scan), code),
+    activity: str(d.Instructions) ?? str(d.Scan),
+    location: str(d.ScannedLocation),
+    raw: d,
+  };
+}
+
+const DELHIVERY_TRACK_URL = (awb: string) => `https://www.delhivery.com/track-v2/package/${encodeURIComponent(awb)}`;
+
+/**
+ * Parse Delhivery's GET /api/v1/packages/json/ response. Returns null for
+ * anything that isn't a tracking answer — including its HTTP-200 error body
+ * `{ Success: false, Error: "Data does not exists…" }` — so the worker counts
+ * a failed sync, never "no news".
+ */
+export function parseDelhiveryTracking(body: unknown): CarrierSnapshot | null {
+  if (!isObj(body) || !Array.isArray(body.ShipmentData)) return null;
+  const first = body.ShipmentData.find((x) => isObj(x) && isObj((x as Obj).Shipment));
+  if (!first) return null;
+  const sh = (first as Obj).Shipment as Obj;
+  const st = isObj(sh.Status) ? (sh.Status as Obj) : {};
+  const awb = str(sh.AWB);
+  const statusType = str(st.StatusType);
+  const statusCode = str(st.StatusCode);
+  const currentLabel = delhiveryLabel(statusType, str(st.Status), statusCode);
+  const scans = dedupeScans((Array.isArray(sh.Scans) ? sh.Scans : []).map(parseDelhiveryScan).filter((s): s is CarrierScan => s !== null));
+  const failedAttempt = currentLabel === "Undelivered";
+  return {
+    awb,
+    courierName: "Delhivery",
+    shipmentId: null,
+    currentLabel,
+    currentCode: statusCode ?? statusType,
+    currentAt: parseCarrierTime(st.StatusDateTime),
+    edd: parseCarrierTime(sh.ExpectedDeliveryDate) ?? parseCarrierTime(sh.PromisedDeliveryDate),
+    pickedUpAt: parseCarrierTime(sh.PickedupDate) ?? parseCarrierTime(sh.OriginRecieveDate),
+    deliveredAt: currentLabel === "Delivered" ? parseCarrierTime(sh.DeliveryDate) ?? parseCarrierTime(st.StatusDateTime) : null,
+    isReturn: false,
+    trackUrl: awb ? DELHIVERY_TRACK_URL(awb) : null,
+    reason: failedAttempt ? str(st.Instructions) : null,
+    attemptCount: null,
+    scans,
+  };
+}
+
+/**
+ * Delhivery scan-push webhook body (default payload): one status change,
+ * `{ Shipment: { AWB, ReferenceNo, NSLCode, Status: { Status, StatusType,
+ * StatusDateTime, StatusLocation, Instructions } } }`, reduced to the same
+ * snapshot shape as a poll, with the status as its single scan.
+ */
+export type DelhiveryWebhook = {
+  Shipment?: {
+    AWB?: string | number;
+    ReferenceNo?: string;
+    NSLCode?: string;
+    Sortcode?: string;
+    PickUpDate?: string;
+    Status?: {
+      Status?: string;
+      StatusType?: string;
+      StatusDateTime?: string;
+      StatusLocation?: string;
+      Instructions?: string;
+    };
+  };
+};
+
+export function parseDelhiveryWebhook(body: DelhiveryWebhook): CarrierSnapshot | null {
+  const sh = body?.Shipment;
+  if (!isObj(sh)) return null;
+  const st = isObj(sh.Status) ? (sh.Status as Obj) : {};
+  const awb = str(sh.AWB);
+  const code = str(sh.NSLCode);
+  const label = delhiveryLabel(str(st.StatusType), str(st.Status), code);
+  const at = parseCarrierTime(st.StatusDateTime);
+  const scan: CarrierScan | null = at
+    ? { at, code: code ?? str(st.StatusType), label, activity: str(st.Instructions) ?? str(st.Status), location: str(st.StatusLocation), raw: st }
+    : null;
+  return {
+    awb,
+    courierName: "Delhivery",
+    shipmentId: null,
+    currentLabel: label,
+    currentCode: code ?? str(st.StatusType),
+    currentAt: at,
+    edd: null,
+    pickedUpAt: null,
+    deliveredAt: label === "Delivered" ? at : null,
+    isReturn: false,
+    trackUrl: awb ? DELHIVERY_TRACK_URL(awb) : null,
+    reason: label === "Undelivered" ? str(st.Instructions) : null,
+    attemptCount: null,
+    scans: scan ? [scan] : [],
+  };
+}
+
 /**
  * Events to store for a snapshot: every scan, plus the summary status as its
  * own event when the courier timed it (webhook current_timestamp) AND it is

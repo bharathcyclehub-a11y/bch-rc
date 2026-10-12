@@ -1,6 +1,19 @@
 import { db } from "@/db";
 import { sites, admins } from "@/db/schema";
-import { requireAdmin } from "@/lib/admin-auth";
+import { requireAdmin, type AdminContext } from "@/lib/admin-auth";
+import { formatDateTimeShort } from "@/lib/admin/format";
+import { can } from "@/lib/admin/permissions";
+import { COURIER_PROVIDER_LABEL, COURIER_PROVIDERS, getCourierAdapter } from "@/lib/couriers";
+import {
+  COURIER_SETTINGS_KEY,
+  delhiveryPickupLocation,
+  loadCourierSettings,
+  warehousePincode,
+} from "@/lib/couriers/settings";
+import { isMissingTableError, settingsMeta } from "@/lib/support/admin-queries";
+import { Badge } from "@/components/admin/Badge";
+import { Panel, PanelHeader } from "@/components/admin/Panel";
+import { CourierSettingsForm } from "./CourierSettingsForm";
 
 export default async function AdminSettings() {
   const ctx = await requireAdmin();
@@ -12,6 +25,8 @@ export default async function AdminSettings() {
       <h1 className="font-display text-lg sm:text-3xl font-bold text-brand-ink">
         Settings
       </h1>
+
+      <CourierRouting ctx={ctx} />
 
       <section className="bg-white rounded-2xl border border-brand-line p-3 sm:p-5">
         <h2 className="font-semibold text-brand-ink mb-3">Sites</h2>
@@ -79,5 +94,63 @@ export default async function AdminSettings() {
         </p>
       </section>
     </div>
+  );
+}
+
+/**
+ * Courier routing (src/lib/couriers/settings.ts): which provider books a new
+ * shipment and how. Owners and managers edit; everyone else sees the same
+ * values read-only. Only whether the Delhivery token is set is shown — never
+ * the token.
+ */
+async function CourierRouting({ ctx }: { ctx: AdminContext }) {
+  const settings = await loadCourierSettings();
+  let meta: Awaited<ReturnType<typeof settingsMeta>> = {};
+  let storageMissing = false;
+  try {
+    meta = await settingsMeta([COURIER_SETTINGS_KEY]);
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err;
+    storageMissing = true;
+  }
+  const canEdit = can(ctx.role, "shipping.settings") && !storageMissing;
+  const delhiveryConfigured = getCourierAdapter("delhivery").isConfigured();
+  const m = meta[COURIER_SETTINGS_KEY];
+  const updated = m
+    ? `Last changed ${formatDateTimeShort(m.updatedAt)}${m.updatedBy ? ` by ${m.updatedBy.split("@")[0]}` : ""}`
+    : "Using the built-in defaults";
+
+  return (
+    <Panel>
+      <PanelHeader
+        title="Courier routing"
+        description={
+          canEdit
+            ? updated
+            : storageMissing
+              ? "Settings storage (app_settings) isn't set up yet — the defaults below are in use."
+              : `${updated} · Read-only — owners and managers can change these.`
+        }
+      />
+      <div className="flex flex-wrap items-center gap-2 px-4 pt-3.5 sm:px-5">
+        <Badge tone={delhiveryConfigured ? "positive" : "attention"}>
+          Delhivery API token {delhiveryConfigured ? "configured" : "not configured"}
+        </Badge>
+        <Badge tone={settings.delhiveryEnabled ? "info" : "neutral"}>
+          Delhivery booking {settings.delhiveryEnabled ? "on" : "off"}
+        </Badge>
+      </div>
+      <CourierSettingsForm
+        initial={settings}
+        providers={COURIER_PROVIDERS.map((p) => ({ value: p, label: COURIER_PROVIDER_LABEL[p] }))}
+        canEdit={canEdit}
+        delhiveryConfigured={delhiveryConfigured}
+        envFallback={{
+          // The env values the blank fields fall back to — only whether they are set.
+          pickupLocation: delhiveryPickupLocation({ ...settings, delhiveryPickupLocation: "" }) !== null,
+          pickupPincode: warehousePincode({ ...settings, pickupPincode: "" }) !== null,
+        }}
+      />
+    </Panel>
   );
 }

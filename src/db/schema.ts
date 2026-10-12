@@ -466,6 +466,22 @@ export const orders = pgTable(
     courierName: text("courier_name"),
     trackingUrl: text("tracking_url"),
     /**
+     * Which platform booked the shipment: "shiprocket" | "delhivery"
+     * (CourierProvider, src/lib/couriers). A Delhivery booking has no
+     * Shiprocket ids — awb_code (the Delhivery waybill) is its whole record.
+     * migrations/manual/2026-10-12_courier_provider.sql.
+     */
+    courierProvider: text("courier_provider").notNull().default("shiprocket"),
+    /** Routing record: the engine's decision + quotes, staff override, booking
+     *  attempt state (CourierRoutingState, src/lib/couriers/routing-state.ts). */
+    courierRouting: jsonb("courier_routing"),
+    /** The booked provider's quote at booking time, paise (see the routing
+     *  record for its components and confidence). */
+    courierQuotedPaise: integer("courier_quoted_paise"),
+    /** What the provider actually billed, paise — from its invoice, entered by
+     *  staff. Never estimated. */
+    courierBilledPaise: integer("courier_billed_paise"),
+    /**
      * Manifest / pickup state — mirrors Shiprocket's lifecycle so an order
      * MOVES from "Ready to Ship" to "Pickups & Manifests" once its manifest
      * is generated (instead of showing in both). Set by printManifestAction /
@@ -1055,6 +1071,8 @@ export const shipmentTracking = pgTable(
       .references(() => orders.id),
     /** FORWARD (the order's own parcel) | RETURN | REPLACEMENT. */
     kind: text("kind").notNull().default("FORWARD"),
+    /** Whose tracking API this AWB is polled on (CourierProvider). */
+    courierProvider: text("courier_provider").notNull().default("shiprocket"),
     shiprocketShipmentId: text("shiprocket_shipment_id"),
     awbCode: text("awb_code"),
     courierName: text("courier_name"),

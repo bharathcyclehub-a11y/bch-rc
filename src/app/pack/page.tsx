@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { db, withDbRetry, DatabaseUnavailableError } from "@/db";
 import { orders } from "@/db/schema";
+import { orderListColumns } from "@/db/order-columns";
 import { isPackAuthenticated } from "@/lib/pack-auth";
 import { PackLoginForm } from "./PackLoginForm";
 import { PackSignOut } from "./PackSignOut";
@@ -151,7 +152,7 @@ function sortColumn(tab: Tab) {
 type Counts = Record<Tab, number>;
 
 type LoadResult =
-  | { ok: true; counts: Counts; rows: Array<typeof orders.$inferSelect> }
+  | { ok: true; counts: Counts; rows: Array<Omit<typeof orders.$inferSelect, "courierRouting">> }
   | { ok: false; error: string };
 
 async function loadTabData(
@@ -180,7 +181,7 @@ async function loadTabData(
     const rows = await withDbRetry(
       () =>
         db
-          .select()
+          .select(orderListColumns)
           .from(orders)
           .where(rowsWhere)
           .orderBy(orderBy)
@@ -372,6 +373,7 @@ export default async function PackPage({
               status={order.status}
               awbCode={order.awbCode}
               courierName={order.courierName}
+              courierProvider={order.courierProvider}
               invoiceNumber={order.invoiceNumber}
               placedAt={order.placedAt}
               shippingAddress={

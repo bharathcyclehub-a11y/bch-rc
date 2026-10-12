@@ -14,6 +14,7 @@ import {
   ShoppingBag,
   Star,
   TriangleAlert,
+  Truck,
   Users,
   Wallet,
   type LucideIcon,
@@ -71,6 +72,7 @@ export const ADMIN_NAV: NavGroup[] = [
     items: [
       { label: "Finance", href: "/admin/finance", icon: Wallet },
       { label: "Returns / RTO", href: "/admin/returns", icon: RotateCcw },
+      { label: "Shipping costs", href: "/admin/analytics/shipping", icon: Truck },
       { label: "Recovery", href: "/admin/recovery", icon: LifeBuoy },
       { label: "Activity", href: "/admin/activity", icon: Activity },
     ],

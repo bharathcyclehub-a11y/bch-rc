@@ -34,7 +34,10 @@ export type AdminPermission =
   | "refunds.approve"
   | "tracking.resync"
   | "exceptions.manage"
-  | "articles.edit";
+  | "articles.edit"
+  | "shipping.settings"
+  | "shipping.book"
+  | "shipping.costs";
 
 const LEGACY: readonly AdminRole[] = ["OWNER", "MANAGER", "SUPPORT"];
 
@@ -55,6 +58,12 @@ const MATRIX: Record<AdminPermission, readonly AdminRole[]> = {
   "tracking.resync": ["OWNER", "MANAGER", "SUPPORT", "SUPPORT_SUPERVISOR", "WAREHOUSE"],
   "exceptions.manage": ["OWNER", "MANAGER", "SUPPORT", "SUPPORT_SUPERVISOR", "WAREHOUSE"],
   "articles.edit": ["OWNER", "MANAGER", "SUPPORT_SUPERVISOR"],
+
+  // Courier routing (src/lib/couriers): who changes the policy, who may book
+  // or move an order's courier before its AWB, who records billed costs.
+  "shipping.settings": ["OWNER", "MANAGER"],
+  "shipping.book": ["OWNER", "MANAGER", "WAREHOUSE"],
+  "shipping.costs": ["OWNER", "MANAGER", "FINANCE"],
 };
 
 export function can(role: AdminRole, permission: AdminPermission): boolean {

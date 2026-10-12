@@ -286,7 +286,7 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
 
   const shipments = await drainShipmentJobs(50).catch((err) => {
     logError("reconcile:shipments", err);
-    return { enqueued: 0, reaped: 0, processed: 0, done: 0, failed: 0 };
+    return { enqueued: 0, reaped: 0, processed: 0, done: 0, failed: 0, held: 0 };
   });
 
   const notifications = await drainNotificationsOutbox(200).catch((err) => {
