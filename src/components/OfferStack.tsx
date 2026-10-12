@@ -34,7 +34,7 @@ const OFFERS_LIST: Offer[] = [
   {
     icon: CreditCard,
     title: `Pay online → ₹${OFFERS.prepaidDiscountINR} off`,
-    sub: `${formatINR(HERO_RETAIL - OFFERS.prepaidDiscountINR)} + same-day dispatch`,
+    sub: `${formatINR(HERO_RETAIL - OFFERS.prepaidDiscountINR)} + 24-hr dispatch`,
   },
   {
     icon: Package,

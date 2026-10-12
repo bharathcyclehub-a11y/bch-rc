@@ -31,6 +31,7 @@ import {
   runShipmentJobOnce,
 } from "@/lib/fulfillment/shipment-queue";
 import { releaseOrderHoldsBestEffort, reacquireOrderHolds } from "@/lib/inventory/release";
+import { applyRazorpayRefundEvent, onlineRefundable } from "@/lib/support/refunds";
 
 export async function POST(req: Request) {
   const rawBody = await req.text();
@@ -53,7 +54,9 @@ export async function POST(req: Request) {
     event: string;
     payload?: {
       payment?: { entity?: { id: string; order_id: string; amount: number; status: string; method?: string | null; error_description?: string } };
-      refund?: { entity?: { id: string; payment_id: string; amount: number; status: string } };
+      refund?: {
+        entity?: { id: string; payment_id: string; amount: number; status: string; notes?: Record<string, string> };
+      };
       payment_link?: { entity?: { id: string; reference_id?: string; amount: number; status: string } };
     };
   };
@@ -74,7 +77,9 @@ export async function POST(req: Request) {
       processed: false,
     });
   } catch (err: unknown) {
-    if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+    // Drizzle wraps the driver error (DrizzleQueryError), so the code is on `cause`.
+    const e = err as { code?: string; cause?: { code?: string } } | null;
+    if ((e?.code ?? e?.cause?.code) === "23505") {
       // Already received. Acknowledge so Razorpay stops retrying.
       return NextResponse.json({ ok: true, duplicate: true });
     }
@@ -308,32 +313,40 @@ export async function POST(req: Request) {
         break;
       }
       case "refund.created":
-      case "refund.processed": {
+      case "refund.processed":
+      case "refund.failed": {
         const refund = event.payload?.refund?.entity;
         if (!refund) break;
         const [order] = await db
           .select()
           .from(orders)
           .where(eq(orders.razorpayPaymentId, refund.payment_id));
-        if (order) {
+        if (!order) break;
+        await db.insert(events).values({
+          siteId: order.siteId,
+          orderId: order.id,
+          customerId: order.customerId,
+          type: `WEBHOOK_${event.event.toUpperCase().replace(".", "_")}`,
+          payload: { refundId: refund.id, amount: refund.amount, status: refund.status ?? null },
+          source: "webhook",
+        });
+        // Refund cases (support centre / admin) settle themselves here.
+        const handled = await applyRazorpayRefundEvent(event.event, refund);
+        // Legacy path for refunds made outside the support centre (Razorpay
+        // dashboard). Only a PROCESSED refund is money back — refund.created
+        // used to mark the order REFUNDED before the bank confirmed anything.
+        if (!handled && event.event === "refund.processed") {
+          const full = refund.amount >= onlineRefundable(order) * 100 && order.paymentMethod !== "COD";
           await db
             .update(orders)
             .set({
-              status: "REFUNDED",
-              paymentStatus: "REFUNDED",
+              ...(full ? { status: "REFUNDED" as const } : {}),
+              paymentStatus: full ? "REFUNDED" : "PARTIALLY_REFUNDED",
               updatedAt: new Date(),
             })
             .where(eq(orders.id, order.id));
-          await db.insert(events).values({
-            siteId: order.siteId,
-            orderId: order.id,
-            customerId: order.customerId,
-            type: `WEBHOOK_${event.event.toUpperCase().replace(".", "_")}`,
-            payload: { refundId: refund.id, amount: refund.amount },
-            source: "webhook",
-          });
           // Refunded goods go back to sellable stock; coupon usage is released.
-          await releaseOrderHoldsBestEffort(order.id, "REFUNDED");
+          if (full) await releaseOrderHoldsBestEffort(order.id, "REFUNDED");
         }
         break;
       }

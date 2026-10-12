@@ -33,7 +33,7 @@ export const POLICIES: Policy[] = [
     slug: "shipping",
     title: "Shipping Policy",
     intro: `How we get your ${BRAND} drift car from our Bangalore warehouse to your door — fast, tracked, and pan-India.`,
-    updated: "2026-06-02",
+    updated: "2026-10-09",
     body: `
 ## Where we ship
 
@@ -41,7 +41,7 @@ We ship pan-India — every PIN code Shiprocket delivers to, which is over 27,00
 
 ## Dispatch time
 
-Orders placed before **4 PM IST** dispatch the **same day** from our Yelahanka, Bangalore warehouse. Orders after 4 PM dispatch the **next working day**. We do not dispatch on Sundays or national holidays — your order moves first thing the next working morning.
+Orders dispatch within **24 hours** from our Yelahanka, Bangalore warehouse. Cash on Delivery orders dispatch within 24 hours of our confirmation call. We do not dispatch on Sundays or national holidays — your order moves first thing the next working morning.
 
 ## Delivery timelines
 
@@ -79,11 +79,11 @@ WhatsApp us at **${WA}** or email **${EMAIL}** — we reply within 4 hours, 10 A
     slug: "replacement",
     title: "Replacement Policy",
     intro: `7-day free replacement on any manufacturing defect, damage in transit, or "this isn't what I ordered" mix-up — no questions asked.`,
-    updated: "2026-06-02",
+    updated: "2026-10-09",
     body: `
 ## The simple version
 
-If your ${BRAND} arrives damaged, defective, or different from what you ordered — WhatsApp us a photo within **7 days of delivery** and we'll dispatch a free replacement the same day. No return courier hassle, no questions.
+If your ${BRAND} arrives damaged, defective, or different from what you ordered — WhatsApp us a photo within **7 days of delivery** and we'll dispatch a free replacement within 24 hours. No return courier hassle, no questions.
 
 ## What's covered
 
@@ -106,7 +106,7 @@ For wear-and-tear after the 7-day window, we sell spare parts (body shell ₹99,
    - Your order ID
    - A photo or short video showing the issue
 2. We confirm within 4 hours during business hours (10 AM – 8 PM IST).
-3. Replacement dispatches the same day — you keep the defective unit, no return courier needed.
+3. Replacement dispatches within 24 hours — you keep the defective unit, no return courier needed.
 4. New tracking sent via WhatsApp.
 
 ## Replacement vs. refund

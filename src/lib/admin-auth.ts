@@ -18,7 +18,7 @@ export type AdminContext = {
   authUserId: string;
   email: string;
   name: string | null;
-  role: "OWNER" | "MANAGER" | "SUPPORT";
+  role: "OWNER" | "MANAGER" | "SUPPORT" | "SUPPORT_SUPERVISOR" | "WAREHOUSE" | "FINANCE";
   siteIds: string[];
 };
 
