@@ -172,7 +172,7 @@ export async function processStoredWebhook(
         });
       }
       const order = await loadOrderForEstimate(fresh.orderId);
-      await reconcileExceptions(fresh, assessRow(fresh, order, now, cfg), { now, notify });
+      await reconcileExceptions(fresh, assessRow(fresh, order, now, cfg), { now, notify: notify && outcome.wasBaselined });
     }
 
     await db

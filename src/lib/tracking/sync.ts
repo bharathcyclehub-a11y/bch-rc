@@ -213,7 +213,7 @@ async function syncClaimed(
         now,
       });
     }
-    await reconcileExceptions(fresh, a, { now, notify });
+    await reconcileExceptions(fresh, a, { now, notify: notify && outcome.wasBaselined });
 
     const delay = nextSyncDelayMinutes(factsFromRow(fresh), a, cfg, now);
     await db

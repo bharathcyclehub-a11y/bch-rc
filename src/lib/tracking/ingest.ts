@@ -414,7 +414,10 @@ export async function applyIngestEffects(
     const t = o.orderTransition;
     if (t?.to === "RETURNED") await releaseOrderHoldsBestEffort(o.orderId, "RTO");
     if (t?.to === "CANCELLED") await releaseOrderHoldsBestEffort(o.orderId, "CANCELLED");
-    if (!opts.notify) return;
+    // The first snapshot of a shipment only establishes its baseline — it
+    // never messages anyone, so going live (or a first poll racing the silent
+    // backfill) can't send customers news about the past.
+    if (!opts.notify || !o.wasBaselined) return;
 
     // Order-lifecycle emails keep their existing semantics (notify.ts decides
     // which are actually sent). Never for a delivery older than a week —

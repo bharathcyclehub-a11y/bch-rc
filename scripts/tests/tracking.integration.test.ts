@@ -329,6 +329,20 @@ describe("tracking pipeline (integration)", () => {
     assert.equal(await count(notificationsOutbox, mine), 0, "pre-existing conditions don't trigger emails afterwards");
   });
 
+  it("even a NORMAL first run (cron firing before the backfill) is silent for existing shipments", async () => {
+    const awb = `NRM${Date.now()}`;
+    const id = await makeOrder({ status: "SHIPPED", awb });
+    stub.track.set(awb, {
+      status: 200,
+      body: trackBody(awb, "IN TRANSIT", [scan("2026-10-01 11:00:00", "PICKED UP", "Picked up", "Bengaluru"), scan("2026-10-02 09:00:00", "IN TRANSIT", "In transit", "Hosur")], "2026-10-04 18:00:00"),
+    });
+    const { notificationsOutbox } = m.schema;
+    await m.sync.runTrackingSync({ trigger: "CRON", now: ist("2026-10-09 11:00:00"), limit: 500 });
+    assert.ok((await openExceptions(id)).includes("EDD_EXPIRED"));
+    await m.sync.runTrackingSync({ trigger: "CRON", now: ist("2026-10-09 11:40:00"), limit: 500 });
+    assert.equal(await count(notificationsOutbox, m.orm.eq(notificationsOutbox.orderId, id)), 0);
+  });
+
   it("re-ship via Shiprocket clone: the cancelled order's new AWB is followed and flagged, the old AWB's late cancel can't override it", async () => {
     const oldAwb = `OLD${Date.now()}`;
     const newAwb = `NEW${Date.now()}`;
