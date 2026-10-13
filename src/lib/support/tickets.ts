@@ -11,7 +11,7 @@
  */
 
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   orders,
@@ -90,7 +90,10 @@ export type CreateTicketInput = {
 export type CreatedTicket = {
   id: string;
   number: string;
-  accessToken: string;
+  /** Null when the message went into an existing ticket (`existing`). */
+  accessToken: string | null;
+  /** True when the customer already had this open ticket and the message was added to it. */
+  existing: boolean;
   priority: Priority;
   status: TicketStatus;
   claimNumber: string | null;
@@ -119,6 +122,24 @@ export async function createTicket(input: CreateTicketInput): Promise<CreatedTic
   const contactPhone = (input.contact.phone ?? addr.phone ?? "").trim() || null;
   const contactName = (input.contact.name ?? addr.fullName ?? "").trim() || null;
   if (!contactEmail && !contactPhone) throw new TicketError("Add an email or phone number so we can reply.");
+
+  // One open ticket per order and problem: a customer who asks again (double
+  // submit, impatience, chat after the form) is added to the ticket they have.
+  if (!staff && order) {
+    const twin = await openTicketFor(order.id, input.category, input.skuId ?? null);
+    if (twin) {
+      await addCustomerMessage(twin, description, input.files ?? [], now);
+      return {
+        id: twin.id,
+        number: twin.number,
+        accessToken: null,
+        existing: true,
+        priority: twin.priority as Priority,
+        status: twin.status as TicketStatus,
+        claimNumber: null,
+      };
+    }
+  }
 
   // Courier facts for the priority rules.
   let trackingDelivered = false;
@@ -268,7 +289,7 @@ export async function createTicket(input: CreateTicketInput): Promise<CreatedTic
     cta: { label: "View your request", url: ticketLink(ticket.number, accessToken) },
   });
 
-  return { id: ticket.id, number: ticket.number, accessToken, priority, status, claimNumber };
+  return { id: ticket.id, number: ticket.number, accessToken, existing: false, priority, status, claimNumber };
 }
 
 async function attachFiles(ticketId: string, messageId: string | null, files: File[], uploadedBy: "CUSTOMER" | "STAFF") {
@@ -596,6 +617,73 @@ export async function linkTicketOrder(t: SupportTicketRow, staffEmail: string, o
     .returning({ id: supportTickets.id });
   if (updated.length === 0) throw new TicketError("This ticket is already linked to an order.");
   await logEvent(t.id, "ORDER_LINKED", staffEmail, { orderId: order.id, matched });
+}
+
+/** The oldest still-open ticket about this order, problem and item, if any. */
+async function openTicketFor(orderId: string, category: string, skuId: string | null): Promise<SupportTicketRow | null> {
+  const [t] = await db
+    .select()
+    .from(supportTickets)
+    .where(
+      and(
+        eq(supportTickets.orderId, orderId),
+        eq(supportTickets.category, category),
+        skuId ? eq(supportTickets.skuId, skuId) : isNull(supportTickets.skuId),
+        inArray(supportTickets.status, [...OPEN_STATUSES]),
+      ),
+    )
+    .orderBy(asc(supportTickets.createdAt))
+    .limit(1);
+  return t ?? null;
+}
+
+/**
+ * Fold a duplicate ticket into the one being kept: its messages (with their
+ * original times) and files move across, it gets a closing note pointing at
+ * the kept ticket, and both audit trails record the merge. No customer email.
+ */
+export async function mergeDuplicateTicket(dup: SupportTicketRow, keep: SupportTicketRow, staffEmail: string, now = new Date()) {
+  if (dup.id === keep.id) throw new TicketError("Pick a different ticket to merge into.");
+  if (dup.siteId !== keep.siteId) throw new TicketError("Both tickets must be on the same store.");
+  if (dup.status === "CLOSED" || keep.status === "CLOSED") throw new TicketError("Closed tickets can't be merged.");
+  const [claim] = await db.select({ id: supportClaims.id }).from(supportClaims).where(eq(supportClaims.ticketId, dup.id)).limit(1);
+  const [refund] = await db.select({ id: refundCases.id }).from(refundCases).where(eq(refundCases.ticketId, dup.id)).limit(1);
+  if (claim || refund) throw new TicketError(`${dup.number} has its own claim or refund — handle it there instead of merging.`);
+
+  await db.transaction(async (tx) => {
+    const msgs = await tx
+      .select()
+      .from(supportTicketMessages)
+      .where(and(eq(supportTicketMessages.ticketId, dup.id), ne(supportTicketMessages.authorType, "SYSTEM")))
+      .orderBy(asc(supportTicketMessages.createdAt));
+    for (const m of msgs) {
+      const [copy] = await tx
+        .insert(supportTicketMessages)
+        .values({ ticketId: keep.id, authorType: m.authorType, authorName: m.authorName, authorEmail: m.authorEmail, body: m.body, internal: m.internal, createdAt: m.createdAt })
+        .returning({ id: supportTicketMessages.id });
+      await tx
+        .update(supportTicketAttachments)
+        .set({ ticketId: keep.id, messageId: copy.id })
+        .where(and(eq(supportTicketAttachments.ticketId, dup.id), eq(supportTicketAttachments.messageId, m.id)));
+    }
+    await tx.update(supportTicketAttachments).set({ ticketId: keep.id }).where(eq(supportTicketAttachments.ticketId, dup.id));
+    await tx.insert(supportTicketMessages).values({
+      ticketId: dup.id,
+      authorType: "SYSTEM",
+      body: `This request was merged into ${keep.number} — we'll continue there.`,
+      createdAt: now,
+    });
+    await tx
+      .update(supportTickets)
+      .set({ status: "CLOSED", closedAt: now, awaiting: "NONE", updatedAt: now })
+      .where(eq(supportTickets.id, dup.id));
+    const lastCustomer = [keep.lastCustomerMessageAt, dup.lastCustomerMessageAt].filter((d): d is Date => !!d).sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+    await tx.update(supportTickets).set({ lastCustomerMessageAt: lastCustomer, updatedAt: now }).where(eq(supportTickets.id, keep.id));
+    await tx.insert(supportTicketEvents).values([
+      { ticketId: dup.id, type: "MERGED_INTO", actor: staffEmail, payload: { number: keep.number } },
+      { ticketId: keep.id, type: "MERGED_FROM", actor: staffEmail, payload: { number: dup.number, messages: msgs.length } },
+    ]);
+  });
 }
 
 async function staffLinkedOrder(ticketId: string): Promise<boolean> {

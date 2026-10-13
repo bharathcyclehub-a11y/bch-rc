@@ -51,6 +51,7 @@ import {
   escalateTicket,
   getTicketById,
   linkTicketOrder,
+  mergeDuplicateTicket,
   setTicketPriority,
   setTicketStatus,
   staffReply,
@@ -211,6 +212,21 @@ export async function escalateAction(ticketId: string, reason: string): Promise<
     return { ok: true, message: "Escalated — the team has been alerted" };
   } catch (err) {
     return fail("admin:support:escalate", err);
+  }
+}
+
+export async function mergeDuplicateAction(duplicateId: string, keepId: string): Promise<DeskResult> {
+  const ctx = await gate("support.reply");
+  if (!ctx) return DENIED("merge tickets");
+  try {
+    const [dup, keep] = await Promise.all([scopedTicket(ctx, duplicateId), scopedTicket(ctx, keepId)]);
+    if (!dup || !keep) return NOT_FOUND;
+    await mergeDuplicateTicket(dup, keep, ctx.email);
+    refresh(dup.id);
+    refresh(keep.id, keep.orderId);
+    return { ok: true, message: `${dup.number} merged into ${keep.number} and closed` };
+  } catch (err) {
+    return fail("admin:support:merge", err);
   }
 }
 

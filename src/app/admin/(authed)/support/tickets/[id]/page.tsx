@@ -37,6 +37,7 @@ import {
 import { ClaimActions } from "./ClaimActions";
 import { Composer } from "./Composer";
 import { LinkOrder, type OrderLead } from "./LinkOrder";
+import { MergeDuplicate } from "./MergeDuplicate";
 import { RefundCaseActions, RequestRefundButton } from "./RefundActions";
 import { TicketActions } from "./TicketActions";
 
@@ -65,7 +66,7 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
   }
   if (!detail || !ctx.siteIds.includes(detail.ticket.siteId)) notFound();
 
-  const { ticket: t, messages, attachments, events, claims, refunds, order, customer } = detail;
+  const { ticket: t, messages, attachments, events, claims, refunds, order, customer, siblings } = detail;
   // No order on the ticket: list the customer's orders by phone / email so staff can pick it.
   const leads: OrderLead[] = order
     ? []
@@ -205,6 +206,28 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
                 description={leads.length ? "Orders placed with this ticket's phone or email — newest first" : undefined}
               />
               <LinkOrder ticketId={t.id} leads={leads} canLink={perm.reply && t.status !== "CLOSED"} />
+            </Panel>
+          )}
+          {siblings.length > 0 && (
+            <Panel>
+              <PanelHeader title="Other open tickets for this order" description="Probably the same problem — merge them so the customer gets one answer" />
+              <ul className="divide-y divide-admin-line">
+                {siblings.map((s) => (
+                  <li key={s.id} className="flex items-center gap-3 px-4 py-2.5 text-[13px] sm:px-5">
+                    <div className="min-w-0 flex-1">
+                      <Link href={`/admin/support/tickets/${s.id}`} className="font-mono text-xs font-semibold text-brand-ink hover:underline">
+                        {s.number}
+                      </Link>
+                      <p className="truncate text-xs text-admin-muted">
+                        {categoryLabel(s.category)} · {ticketStatusLabel(s.status)} · opened {formatRelative(s.createdAt, now.getTime()).toLowerCase()}
+                      </p>
+                    </div>
+                    {perm.reply && t.status !== "CLOSED" && (
+                      <MergeDuplicate keepId={t.id} keepNumber={t.number} duplicateId={s.id} duplicateNumber={s.number} />
+                    )}
+                  </li>
+                ))}
+              </ul>
             </Panel>
           )}
           {order && (

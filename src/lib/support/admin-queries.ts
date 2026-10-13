@@ -459,7 +459,7 @@ export async function loadTicketDetail(id: string) {
     ? or(eq(refundCases.ticketId, ticket.id), eq(refundCases.orderId, ticket.orderId))
     : eq(refundCases.ticketId, ticket.id);
 
-  const [messages, attachments, events, claims, refunds, orderRows, customerRows] = await Promise.all([
+  const [messages, attachments, events, claims, refunds, orderRows, customerRows, siblings] = await Promise.all([
     db.select().from(supportTicketMessages).where(eq(supportTicketMessages.ticketId, ticket.id)).orderBy(asc(supportTicketMessages.createdAt)),
     db
       .select({
@@ -496,6 +496,20 @@ export async function loadTicketDetail(id: string) {
           .from(customers)
           .where(eq(customers.id, ticket.customerId))
       : Promise.resolve([]),
+    // Other open tickets about the same order — likely duplicates to merge.
+    ticket.orderId
+      ? db
+          .select({
+            id: supportTickets.id,
+            number: supportTickets.number,
+            category: supportTickets.category,
+            status: supportTickets.status,
+            createdAt: supportTickets.createdAt,
+          })
+          .from(supportTickets)
+          .where(and(eq(supportTickets.orderId, ticket.orderId), ne(supportTickets.id, ticket.id), inArray(supportTickets.status, [...OPEN_STATUSES])))
+          .orderBy(asc(supportTickets.createdAt))
+      : Promise.resolve([]),
   ]);
 
   return {
@@ -507,6 +521,7 @@ export async function loadTicketDetail(id: string) {
     refunds,
     order: orderRows[0] ?? null,
     customer: customerRows[0] ?? null,
+    siblings,
   };
 }
 

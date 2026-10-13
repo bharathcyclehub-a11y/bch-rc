@@ -188,7 +188,10 @@ export async function submitTicketAction(fd: FormData): Promise<ActionResult> {
     });
     return {
       ok: true,
-      href: `/support/tickets/${created.number}?k=${encodeURIComponent(created.accessToken)}&created=1`,
+      // An existing ticket opens through the verified session (it's theirs).
+      href: created.accessToken
+        ? `/support/tickets/${created.number}?k=${encodeURIComponent(created.accessToken)}&created=1`
+        : `/support/tickets/${created.number}?added=1`,
     };
   } catch (err) {
     if (err instanceof TicketError || err instanceof EvidenceError) return { ok: false, error: err.message };

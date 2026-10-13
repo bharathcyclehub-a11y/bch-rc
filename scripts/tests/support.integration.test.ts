@@ -213,6 +213,45 @@ describe("linking an order to a ticket raised without one", () => {
   });
 });
 
+describe("duplicate tickets", () => {
+  it("a second request about the same order and problem joins the open ticket", async () => {
+    const o = await makeOrder({ status: "SHIPPED" });
+    const ask = (description: string) =>
+      m.tickets.createTicket({ category: "DELIVERY_DELAYED", description, orderId: o.id, contact: {}, verifiedCustomerId: o.customerId, actor: "customer" });
+    const first = await ask("Still not shipped after a week");
+    const second = await ask("Please send it urgently, it is a gift");
+    assert.equal(first.existing, false);
+    assert.equal(second.existing, true);
+    assert.equal(second.number, first.number);
+    assert.equal(second.accessToken, null);
+    const { db } = m.dbmod;
+    const { supportTicketMessages, supportTickets } = m.schema;
+    const { eq } = m.orm;
+    assert.equal((await db.select().from(supportTicketMessages).where(eq(supportTicketMessages.ticketId, first.id))).length, 2);
+    assert.equal((await db.select().from(supportTickets).where(eq(supportTickets.orderId, o.id))).length, 1);
+  });
+
+  it("staff merge moves the messages and closes the duplicate", async () => {
+    const o = await makeOrder({ status: "SHIPPED" });
+    const raise = (description: string) =>
+      m.tickets.createTicket({ category: "DELIVERY_DELAYED", description, orderId: o.id, contact: {}, actor: "staff@example.com" });
+    const keep = await raise("Customer called: where is my parcel");
+    const dup = await raise("Customer emailed: same question again");
+    const { db } = m.dbmod;
+    const { supportTicketMessages, supportTickets } = m.schema;
+    const { eq } = m.orm;
+    const row = async (id: string) => (await db.select().from(supportTickets).where(eq(supportTickets.id, id)))[0];
+    await m.tickets.mergeDuplicateTicket(await row(dup.id), await row(keep.id), "staff@example.com");
+    const kept = await db.select().from(supportTicketMessages).where(eq(supportTicketMessages.ticketId, keep.id));
+    assert.deepEqual(kept.map((x: any) => x.body).sort(), ["Customer called: where is my parcel", "Customer emailed: same question again"]);
+    const closed = await row(dup.id);
+    assert.equal(closed.status, "CLOSED");
+    const note = await db.select().from(supportTicketMessages).where(eq(supportTicketMessages.ticketId, dup.id));
+    assert.ok(note.some((x: any) => x.authorType === "SYSTEM" && x.body.includes(keep.number)));
+    await assert.rejects(m.tickets.mergeDuplicateTicket(closed, await row(keep.id), "staff@example.com"), /can't be merged/);
+  });
+});
+
 describe("claims", () => {
   it("won't promise a replacement without stock, then commits stock exactly once", async () => {
     const o = await makeOrder({ status: "DELIVERED", deliveredDaysAgo: 2 });

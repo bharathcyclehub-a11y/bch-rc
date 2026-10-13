@@ -170,7 +170,12 @@ export const guidedProvider: AssistantProvider = {
           context: { handoff: reason, transcript: turn.transcript.slice(-20) },
         });
         return reply({
-          text: [`I've passed this to our team as ticket ${created.number}, with this conversation attached — you won't need to repeat anything.`, "We reply within support hours (10 AM – 8 PM IST). You can also WhatsApp us."],
+          text: [
+            created.existing
+              ? `You already have an open request about this — I've added this conversation to ticket ${created.number}, so our team sees everything in one place.`
+              : `I've passed this to our team as ticket ${created.number}, with this conversation attached — you won't need to repeat anything.`,
+            "We reply within support hours (10 AM – 8 PM IST). You can also WhatsApp us.",
+          ],
           cards: [{ kind: "ticket", number: created.number }, { kind: "link", label: "WhatsApp us", href: waLink(`Hi, about ticket ${created.number}.`) }],
         });
       }
