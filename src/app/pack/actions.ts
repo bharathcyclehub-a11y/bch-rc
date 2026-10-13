@@ -15,7 +15,7 @@
  */
 
 import { revalidatePath } from "next/cache";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { orders, events, shipmentJobs, shipmentTracking } from "@/db/schema";
 import { isPackAuthenticated } from "@/lib/pack-auth";
@@ -226,10 +226,30 @@ export async function schedulePickupForOrderAction(
     return { ok: false, error: "AWB not yet assigned. Generate AWB first." };
   }
 
+  // Delhivery books ONE pickup per location per day for every parcel waiting
+  // there — so ask for all of them at once (its expected package count plans
+  // the rider's visit) and mark them all requested, instead of one per click.
+  const waiting =
+    provider === "delhivery"
+      ? await db
+          .select({ id: orders.id, awbCode: orders.awbCode, courierProvider: orders.courierProvider, shiprocketOrderId: orders.shiprocketOrderId })
+          .from(orders)
+          .where(
+            and(
+              eq(orders.courierProvider, "delhivery"),
+              eq(orders.status, "PACKED"),
+              isNotNull(orders.awbCode),
+              isNull(orders.pickupScheduledAt),
+            ),
+          )
+      : [];
+  const covered = [...new Set([orderId, ...waiting.map((w) => w.id)])];
+  const refs = provider === "delhivery" ? [ref, ...waiting.filter((w) => w.id !== orderId).map((w) => shipmentRefOf(w))] : [ref];
+
   // Shiprocket's "already scheduled" (premium couriers auto-schedule) and
   // Delhivery's "pickup already requested for the day" both come back as
   // ok + alreadyScheduled: the parcel IS covered, just not by a new request.
-  const result = await getCourierAdapter(provider).schedulePickup([ref]);
+  const result = await getCourierAdapter(provider).schedulePickup(refs);
   if (!result.ok) {
     return { ok: false, error: result.message };
   }
@@ -237,7 +257,7 @@ export async function schedulePickupForOrderAction(
   await db
     .update(orders)
     .set({ pickupScheduledAt: new Date(), updatedAt: new Date() })
-    .where(eq(orders.id, orderId));
+    .where(inArray(orders.id, covered));
   await db.insert(events).values({
     siteId: order.siteId,
     orderId: order.id,
@@ -248,11 +268,12 @@ export async function schedulePickupForOrderAction(
       scheduledFor: result.scheduledFor,
       pickupId: result.pickupId,
       alreadyScheduled: result.alreadyScheduled,
+      parcels: covered.length,
       by: "pack-console",
     },
     source: "operator",
   });
-  revalidateOrderEverywhere(orderId);
+  for (const id of covered) revalidateOrderEverywhere(id);
   return {
     ok: true,
     scheduledFor: result.scheduledFor ?? "auto-scheduled",
