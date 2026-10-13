@@ -124,6 +124,14 @@ async function findTrackingId(e: ShiprocketWebhook): Promise<string | null | typ
   // well: track it as its own parcel so staff see both.
   if (asCourierProvider(fwd.courierProvider) === "delhivery") {
     if (!awb) return IGNORED;
+    // The AWB of the Shiprocket booking this order was moved off (its
+    // cancellation, a late scan) — history, not a second parcel.
+    const [old] = await db
+      .select({ id: shipmentTrackingEvents.id })
+      .from(shipmentTrackingEvents)
+      .where(and(eq(shipmentTrackingEvents.orderId, orderId), eq(shipmentTrackingEvents.awbCode, awb)))
+      .limit(1);
+    if (old) return IGNORED;
     await db
       .insert(shipmentTracking)
       .values({ siteId: o.siteId, orderId, kind: "REPLACEMENT", courierProvider: "shiprocket", awbCode: awb, status: "UNKNOWN" })
