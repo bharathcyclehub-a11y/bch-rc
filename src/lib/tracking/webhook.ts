@@ -19,6 +19,7 @@ import {
   type DelhiveryWebhook,
   type ShiprocketWebhook,
 } from "./carrier";
+import { asCourierProvider } from "@/lib/couriers";
 import { normalizeCarrierStatus } from "./status";
 import { applyIngestEffects, ingestSnapshot, loadTrackingRow } from "./ingest";
 import { assessRow, loadOrderForEstimate, raiseException, reconcileExceptions } from "./exceptions";
@@ -46,7 +47,10 @@ export function webhookExternalId(e: ShiprocketWebhook): string {
 /** Statuses in which a FORWARD row may be moved to a re-ship's new AWB. */
 const REPOINTABLE = new Set(["CANCELLED", "AWAITING_AWB", "AWAITING_PICKUP", "UNKNOWN"]);
 
-async function findTrackingId(e: ShiprocketWebhook): Promise<string | null> {
+/** The event matched an order but deliberately applies to no shipment. */
+const IGNORED = Symbol("ignored");
+
+async function findTrackingId(e: ShiprocketWebhook): Promise<string | null | typeof IGNORED> {
   const awb = e.awb != null ? String(e.awb).trim() : "";
   if (awb) {
     const [t] = await db
@@ -111,6 +115,30 @@ async function findTrackingId(e: ShiprocketWebhook): Promise<string | null> {
     return t?.id ?? null;
   }
 
+  // The order is booked on Delhivery now (staff moved it off Shiprocket before
+  // its AWB, or routing sent it there). Shiprocket only knows the old,
+  // courier-less order we cancelled, so its events — that cancellation above
+  // all — are about nothing that ships and must not touch the Delhivery
+  // parcel's tracking (13 Oct 2026: six moved orders read "cancelled at
+  // courier"). An event WITH an AWB means a Shiprocket courier was booked as
+  // well: track it as its own parcel so staff see both.
+  if (asCourierProvider(fwd.courierProvider) === "delhivery") {
+    if (!awb) return IGNORED;
+    // The AWB of the Shiprocket booking this order was moved off (its
+    // cancellation, a late scan) — history, not a second parcel.
+    const [old] = await db
+      .select({ id: shipmentTrackingEvents.id })
+      .from(shipmentTrackingEvents)
+      .where(and(eq(shipmentTrackingEvents.orderId, orderId), eq(shipmentTrackingEvents.awbCode, awb)))
+      .limit(1);
+    if (old) return IGNORED;
+    await db
+      .insert(shipmentTracking)
+      .values({ siteId: o.siteId, orderId, kind: "REPLACEMENT", courierProvider: "shiprocket", awbCode: awb, status: "UNKNOWN" })
+      .onConflictDoNothing();
+    return idByAwb();
+  }
+
   // A DIFFERENT AWB for an order we already track:
   //   - a superseded AWB (seen before on this order, or a cancellation)
   //     → the forward row, where ingest keeps it as history only;
@@ -160,6 +188,10 @@ export async function processStoredWebhook(
   try {
     const event = (payload ?? {}) as ShiprocketWebhook;
     const trackingId = await findTrackingId(event);
+    if (trackingId === IGNORED) {
+      await markWebhook(rowId, now, "Shiprocket event for an order now booked on Delhivery — not applied");
+      return { matched: false };
+    }
     if (!trackingId) {
       await db
         .update(webhooksInbound)

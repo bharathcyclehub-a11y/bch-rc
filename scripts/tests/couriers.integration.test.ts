@@ -564,6 +564,60 @@ describe("courier booking (integration)", () => {
     assert.equal(db2.reasonCode, "PREFERRED_COST_UNVERIFIED");
     assert.equal(db2.savingsPaise, null);
   });
+
+  it("Shiprocket's cancel webhook for the old courier-less order never marks the Delhivery parcel cancelled", async () => {
+    await routing({ mode: "auto", delhiveryEnabled: true });
+    stub.dlvLookup = "ok";
+    stub.dlvCreate = "ok";
+    const id = await makeOrder();
+    assert.equal((await run(id)).result.courierProvider, "delhivery");
+    const { db: d } = m.dbmod;
+    const { webhooksInbound, shipmentTracking: st, deliveryExceptions } = m.schema;
+    const { and: andOp, eq: eqOp } = m.orm;
+    const payload = { order_id: id, channel_order_id: id, current_status: "CANCELED", shipment_status: "CANCELED", current_timestamp: "13 10 2026 14:36:00" };
+    const [row] = await d
+      .insert(webhooksInbound)
+      .values({ source: "shiprocket", externalId: `test-${id}`, payload, processed: false })
+      .returning({ id: webhooksInbound.id });
+    const r = await m.webhook.processStoredWebhook(row.id, `test-${id}`, payload);
+    assert.equal(r.matched, false);
+    const [w] = await d.select().from(webhooksInbound).where(eqOp(webhooksInbound.id, row.id));
+    assert.equal(w.processed, true);
+    assert.match(w.error ?? "", /booked on Delhivery/);
+    const [t] = await d.select().from(st).where(andOp(eqOp(st.orderId, id), eqOp(st.kind, "FORWARD")));
+    assert.notEqual(t.status, "CANCELLED");
+    assert.equal(t.courierProvider, "delhivery");
+    const open = await d.select().from(deliveryExceptions).where(eqOp(deliveryExceptions.orderId, id));
+    assert.equal(open.filter((x: any) => x.type === "SHIPMENT_CANCELLED").length, 0);
+  });
+
+  it("a parcel moved off a Shiprocket AWB: Shiprocket's cancel of the OLD AWB is history, not a second parcel", async () => {
+    await routing({ mode: "auto", delhiveryEnabled: true });
+    stub.dlvLookup = "ok";
+    stub.dlvCreate = "ok";
+    const id = await makeOrder();
+    assert.equal((await run(id)).result.courierProvider, "delhivery");
+    const { db: d } = m.dbmod;
+    const { webhooksInbound, shipmentTracking: st, shipmentTrackingEvents: ev } = m.schema;
+    const { eq: eqOp } = m.orm;
+    const fwd = await m.sync.ensureForwardTracking(id);
+    const oldAwb = `OLD${Date.now()}`;
+    // History of the Shiprocket (Blue Dart) booking the order was moved off.
+    await d.insert(ev).values({
+      trackingId: fwd.id, orderId: id, awbCode: oldAwb, source: "WEBHOOK", eventAt: new Date("2026-10-12T12:34:00Z"),
+      status: "AWAITING_PICKUP", carrierStatusLabel: "PICKUP SCHEDULED", fingerprint: `fp-${oldAwb}`, raw: {},
+    });
+    const payload = { awb: oldAwb, order_id: id, channel_order_id: id, current_status: "CANCELED", current_timestamp: "13 10 2026 15:40:00" };
+    const [row] = await d
+      .insert(webhooksInbound)
+      .values({ source: "shiprocket", externalId: `test-old-${id}`, payload, processed: false })
+      .returning({ id: webhooksInbound.id });
+    const r = await m.webhook.processStoredWebhook(row.id, `test-old-${id}`, payload);
+    assert.equal(r.matched, false);
+    const rows = await d.select().from(st).where(eqOp(st.orderId, id));
+    assert.equal(rows.length, 1, "no REPLACEMENT row for the old AWB");
+    assert.notEqual(rows[0].status, "CANCELLED");
+  });
 });
 
 // ---- Delhivery tracking --------------------------------------------------------

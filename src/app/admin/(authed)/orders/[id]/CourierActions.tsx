@@ -17,7 +17,8 @@ type Props = {
   canBook: boolean;
   canCosts: boolean;
   /** Providers staff may choose now (before an AWB), with their labels. */
-  bookable: Array<{ provider: string; label: string; recommended: boolean }>;
+  /** `move`: the order already has a Shiprocket AWB not yet picked up. */
+  bookable: Array<{ provider: string; label: string; recommended: boolean; move?: boolean }>;
   hasAwb: boolean;
   billedInr: number | null;
 };
@@ -53,24 +54,27 @@ export function CourierActions({ orderId, canBook, canCosts, bookable, hasAwb, b
           </Button>
         )}
         {canBook &&
-          !hasAwb &&
-          bookable.map((b) => (
-            <Button
-              key={b.provider}
-              size="sm"
-              variant={b.recommended ? "primary" : "secondary"}
-              disabled={pending}
-              icon={<Truck size={14} aria-hidden />}
-              onClick={() =>
-                run(
-                  () => bookWithProviderAction(orderId, b.provider),
-                  `Book this order with ${b.label}? If it is on Shiprocket without an AWB, that Shiprocket order is cancelled first.`,
-                )
-              }
-            >
-              Book with {b.label}
-            </Button>
-          ))}
+          bookable
+            .filter((b) => !hasAwb || b.move)
+            .map((b) => (
+              <Button
+                key={b.provider}
+                size="sm"
+                variant={b.recommended ? "primary" : "secondary"}
+                disabled={pending}
+                icon={<Truck size={14} aria-hidden />}
+                onClick={() =>
+                  run(
+                    () => bookWithProviderAction(orderId, b.provider),
+                    b.move
+                      ? `Move this parcel to ${b.label}? Its Shiprocket booking (current AWB and courier) is cancelled first, then ${b.label} is booked. Replace the label on the parcel with the new one.`
+                      : `Book this order with ${b.label}? If it is on Shiprocket without an AWB, that Shiprocket order is cancelled first.`,
+                  )
+                }
+              >
+                {b.move ? `Move to ${b.label}` : `Book with ${b.label}`}
+              </Button>
+            ))}
         {canBook && hasAwb && (
           <Button
             size="sm"

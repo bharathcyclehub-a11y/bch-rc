@@ -36,11 +36,19 @@ export async function CourierPanel({ order }: { order: typeof orders.$inferSelec
   const canCosts = can(ctx.role, "shipping.costs");
   const preAwb = (order.status === "PAID" || order.status === "PACKED") && !order.awbCode;
 
+  // A Shiprocket parcel with an AWB that the courier hasn't collected yet can
+  // be moved to Delhivery (the Shiprocket booking is cancelled first).
+  const movable =
+    provider === "shiprocket" && !!order.awbCode && order.status === "PACKED" && !order.shippedAt &&
+    settings.mode !== "off" && settings.delhiveryEnabled;
+
   const bookable = preAwb && settings.mode !== "off"
     ? COURIER_PROVIDERS.filter((p) => (p === "delhivery" ? settings.delhiveryEnabled : settings.shiprocketEnabled))
         .filter((p) => !(p === "shiprocket" && ref && provider === "shiprocket"))
         .map((p) => ({ provider: p, label: COURIER_PROVIDER_LABEL[p], recommended: verdict?.recommended === p }))
-    : [];
+    : movable
+      ? [{ provider: "delhivery", label: COURIER_PROVIDER_LABEL.delhivery, recommended: true, move: true }]
+      : [];
 
   return (
     <Panel>

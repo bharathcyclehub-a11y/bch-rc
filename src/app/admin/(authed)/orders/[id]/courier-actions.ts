@@ -40,6 +40,7 @@ import { readRoutingState } from "@/lib/couriers/routing-state";
 import { loadCourierSettings } from "@/lib/couriers/settings";
 import { enqueueShipmentJob, runShipmentJobOnce } from "@/lib/fulfillment/shipment-queue";
 import { logError } from "@/lib/logger";
+import { MOVING_STATUSES, type TrackingStatus } from "@/lib/tracking/status";
 
 export type CourierActionResult = { ok: true; message: string; url?: string } | { ok: false; error: string };
 
@@ -104,10 +105,23 @@ export async function bookWithProviderAction(orderId: string, provider: string):
   const label = COURIER_PROVIDER_LABEL[target];
 
   if (order.status !== "PAID" && order.status !== "PACKED") return no(`Order is ${order.status} — it can't be booked.`);
+  // An AWB the courier hasn't collected yet can be MOVED: only a Shiprocket
+  // booking, only to another provider, and its Shiprocket order is cancelled
+  // first (below) — a second shipment is never created next to a live one.
   if (order.awbCode) {
-    return no(
-      "This order already has an AWB. To change courier, cancel that booking first (from /pack) — a second shipment is never created next to a live one.",
-    );
+    const movable = isOnShiprocket(order) && target !== "shiprocket" && order.status === "PACKED" && !order.shippedAt;
+    if (!movable) {
+      return no(
+        "This order already has an AWB. To change courier, cancel that booking first (from /pack) — a second shipment is never created next to a live one.",
+      );
+    }
+    const [t] = await db
+      .select({ pickedUpAt: shipmentTracking.pickedUpAt, status: shipmentTracking.status })
+      .from(shipmentTracking)
+      .where(and(eq(shipmentTracking.orderId, orderId), eq(shipmentTracking.kind, "FORWARD")));
+    if (t?.pickedUpAt || (t && MOVING_STATUSES.has(t.status as TrackingStatus))) {
+      return no("The courier has already picked this parcel up — it can't be moved now.");
+    }
   }
   const settings = await loadCourierSettings();
   if (settings.mode === "off") return no("Courier routing is off in settings — orders book on Shiprocket as before.");
@@ -138,29 +152,72 @@ export async function bookWithProviderAction(orderId: string, provider: string):
     if (!cancelled.ok) {
       return no(`Couldn't cancel Shiprocket order ${order.shiprocketOrderId}: ${cancelled.message}. Nothing was changed.`);
     }
+    const oldAwb = order.awbCode;
     state = {
       ...state,
       history: [
         ...(state.history ?? []),
-        { at: now.toISOString(), by: ctx.email, detail: `Cancelled Shiprocket order ${order.shiprocketOrderId} (no AWB) to book ${label}` },
+        {
+          at: now.toISOString(),
+          by: ctx.email,
+          detail: `Cancelled Shiprocket order ${order.shiprocketOrderId}${oldAwb ? ` (${order.courierName ?? "courier"} AWB ${oldAwb}, not picked up)` : " (no AWB)"} to book ${label}`,
+        },
       ],
     };
+    // The old booking is gone: clear its ids, AWB, label/pickup state so the
+    // order books afresh and /pack shows it as Ready to Ship again.
     await db
       .update(orders)
-      .set({ shiprocketOrderId: null, shiprocketShipmentId: null, updatedAt: now })
+      .set({
+        shiprocketOrderId: null,
+        shiprocketShipmentId: null,
+        awbCode: null,
+        courierName: null,
+        trackingUrl: null,
+        manifestedAt: null,
+        manifestUrl: null,
+        pickupScheduledAt: null,
+        updatedAt: now,
+      })
       .where(eq(orders.id, orderId));
-    // The tracking row followed the Shiprocket shipment; point it at the new
-    // provider so the worker doesn't poll a cancelled Shiprocket booking.
+    // The tracking row followed the Shiprocket shipment; reset it for the new
+    // provider so the worker doesn't poll a cancelled booking. Its old events
+    // stay as history (tied to the old AWB). No baseline: the new courier's
+    // first answer is silent, like any new shipment.
     await db
       .update(shipmentTracking)
-      .set({ shiprocketShipmentId: null, courierProvider: target, status: "AWAITING_AWB", updatedAt: now })
+      .set({
+        courierProvider: target,
+        shiprocketShipmentId: null,
+        awbCode: null,
+        courierName: null,
+        status: "AWAITING_AWB",
+        statusLabel: null,
+        statusChangedAt: null,
+        summaryStatus: null,
+        summaryAt: null,
+        lastEventAt: null,
+        lastEventActivity: null,
+        lastEventLocation: null,
+        eddAt: null,
+        eddSource: null,
+        eddUpdatedAt: null,
+        pickedUpAt: null,
+        deliveredAt: null,
+        terminalAt: null,
+        deliveryAttempts: 0,
+        baselineAt: null,
+        active: true,
+        nextSyncAt: now,
+        updatedAt: now,
+      })
       .where(and(eq(shipmentTracking.orderId, orderId), eq(shipmentTracking.kind, "FORWARD")));
     await db.insert(events).values({
       siteId: order.siteId,
       orderId,
       customerId: order.customerId,
       type: "COURIER_PROVIDER_SWITCHED",
-      payload: { from: "shiprocket", to: target, shiprocketOrderId: order.shiprocketOrderId, by: ctx.email },
+      payload: { from: "shiprocket", to: target, shiprocketOrderId: order.shiprocketOrderId, oldAwb, by: ctx.email },
       source: "operator",
     });
   }
