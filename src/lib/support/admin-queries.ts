@@ -27,6 +27,7 @@ import {
   supportTicketEvents,
   supportTicketMessages,
   supportTickets,
+  type SupportTicketRow,
 } from "@/db/schema";
 import { addUtcDays, istDayStart, istYmd } from "@/lib/tz";
 import { OPEN_STATUSES, type Priority } from "./rules";
@@ -573,4 +574,68 @@ export async function listArticleOptions() {
     .select({ id: helpArticles.id, slug: helpArticles.slug, title: helpArticles.title, status: helpArticles.status })
     .from(helpArticles)
     .orderBy(asc(helpArticles.title));
+}
+
+const digits10 = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").slice(-10);
+const last10 = (col: SQL) => sql`right(regexp_replace(coalesce(${col}, ''), '[^0-9]', '', 'g'), 10)`;
+
+export type ContactOrder = {
+  id: string;
+  createdAt: Date;
+  status: string;
+  totalInr: number;
+  paymentMethod: string;
+  items: string;
+  matches: Array<"phone" | "email">;
+};
+
+/**
+ * Recent orders on the ticket's store placed with the ticket's phone or email
+ * (checkout address or customer record), so staff can tell which order a
+ * ticket raised without an order ID is about. A match is a lead, not proof
+ * of ownership — the ticket page says so.
+ */
+export async function findContactOrders(
+  t: Pick<SupportTicketRow, "siteId" | "contactEmail" | "contactPhone">,
+  limit = 5,
+): Promise<ContactOrder[]> {
+  const email = t.contactEmail?.trim().toLowerCase() || null;
+  const phone = digits10(t.contactPhone);
+  const emailHit = email
+    ? sql`(lower(${orders.shippingAddress}->>'email') = ${email} or lower(coalesce(${customers.email}, '')) = ${email})`
+    : null;
+  const phoneHit =
+    phone.length === 10
+      ? sql`(${last10(sql`${orders.shippingAddress}->>'phone'`)} = ${phone} or ${last10(sql`${customers.phone}`)} = ${phone})`
+      : null;
+  if (!emailHit && !phoneHit) return [];
+
+  const rows = await db
+    .select({
+      id: orders.id,
+      createdAt: orders.createdAt,
+      status: orders.status,
+      totalInr: orders.totalInr,
+      paymentMethod: orders.paymentMethod,
+      items: orders.items,
+      emailHit: sql<boolean>`${emailHit ?? sql`false`}`,
+      phoneHit: sql<boolean>`${phoneHit ?? sql`false`}`,
+    })
+    .from(orders)
+    .leftJoin(customers, eq(customers.id, orders.customerId))
+    .where(and(eq(orders.siteId, t.siteId), or(...[emailHit, phoneHit].filter((c): c is SQL => !!c))))
+    .orderBy(desc(orders.createdAt))
+    .limit(limit);
+
+  return rows.map((r) => ({
+    id: r.id,
+    createdAt: r.createdAt,
+    status: r.status,
+    totalInr: r.totalInr,
+    paymentMethod: r.paymentMethod,
+    items: (Array.isArray(r.items) ? (r.items as Array<{ name?: string; qty?: number }>) : [])
+      .map((i) => `${i.qty && i.qty > 1 ? `${i.qty}× ` : ""}${i.name ?? "Item"}`)
+      .join(", "),
+    matches: [...(r.phoneHit ? (["phone"] as const) : []), ...(r.emailHit ? (["email"] as const) : [])],
+  }));
 }

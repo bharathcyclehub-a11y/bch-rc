@@ -86,6 +86,7 @@ before(async () => {
     orm: await import("drizzle-orm"),
     verify: await import("../../src/lib/support/verify"),
     tickets: await import("../../src/lib/support/tickets"),
+    adminQueries: await import("../../src/lib/support/admin-queries"),
     claims: await import("../../src/lib/support/claims"),
     refunds: await import("../../src/lib/support/refunds"),
     settings: await import("../../src/lib/settings"),
@@ -181,6 +182,34 @@ describe("tickets", () => {
     });
     assert.equal(t.priority, "CRITICAL");
     assert.equal(t.status, "ESCALATED");
+  });
+});
+
+describe("linking an order to a ticket raised without one", () => {
+  it("finds the order by phone, links it once, and keeps it hidden from an unverified customer", async () => {
+    const o = await makeOrder({ status: "SHIPPED" });
+    await makeOrder({ status: "SHIPPED" }); // someone else's order — must not match
+    const t = await m.tickets.createTicket({
+      category: "GENERAL",
+      description: "Ten days and still no update on my order",
+      contact: { name: "Guest", email: "Other.Address@Example.com", phone: `+91 ${o.phone.slice(0, 5)} ${o.phone.slice(5)}` },
+      verifiedCustomerId: null,
+      actor: "customer",
+    });
+    const { db } = m.dbmod;
+    const { supportTickets } = m.schema;
+    const { eq } = m.orm;
+    const [row] = await db.select().from(supportTickets).where(eq(supportTickets.id, t.id));
+
+    const leads = await m.adminQueries.findContactOrders(row);
+    assert.deepEqual(leads.map((l: any) => [l.id, l.matches]), [[o.id, ["phone"]]]);
+
+    await m.tickets.linkTicketOrder(row, "staff@example.com", o.id, ["phone"]);
+    const [linked] = await db.select().from(supportTickets).where(eq(supportTickets.id, t.id));
+    assert.equal(linked.orderId, o.id);
+    assert.equal(linked.identityVerified, false);
+    assert.equal((await m.tickets.customerTicketView(linked)).orderId, null);
+    await assert.rejects(m.tickets.linkTicketOrder(linked, "staff@example.com", o.id, ["phone"]), /already linked/);
   });
 });
 
