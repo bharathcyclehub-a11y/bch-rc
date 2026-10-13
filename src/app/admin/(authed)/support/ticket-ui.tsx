@@ -190,6 +190,7 @@ const EVENT_LABEL: Record<string, string> = {
   REOPENED: "Reopened by customer",
   RESOLVED_BY_CUSTOMER: "Marked solved by customer",
   AUTO_CLOSED: "Closed automatically",
+  ORDER_LINKED: "Order linked",
   CLAIM_CREATED: "Claim created",
   CLAIM_DECIDED: "Claim decision",
   CLAIM_SHIPMENT: "Claim shipment recorded",
@@ -235,6 +236,8 @@ export function eventDetail(type: string, p: Record<string, unknown>): string | 
     case "CUSTOMER_REPLIED":
     case "REOPENED":
       return typeof p.files === "number" && p.files > 0 ? `${p.files} file${p.files === 1 ? "" : "s"} attached` : null;
+    case "ORDER_LINKED":
+      return [str(p.orderId), Array.isArray(p.matched) && !p.matched.includes("manual") ? `matched by ${p.matched.join(" + ")}` : "entered by staff"].filter(Boolean).join(" · ");
     case "CLAIM_CREATED":
       return [str(p.claim), p.eligible ? "within policy" : "outside policy / needs review", p.missingEvidence ? "evidence missing" : ""]
         .filter(Boolean)

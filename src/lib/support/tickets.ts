@@ -384,7 +384,9 @@ export async function customerTicketView(t: SupportTicketRow, now: Date = new Da
     status,
     statusLabel: TICKET_STATUS_LABEL[status],
     stage: customerStage(status),
-    orderId: t.orderId,
+    // An order staff linked to an unverified ticket stays staff-side: whoever
+    // raised it hasn't proved it's theirs, so its id isn't shown back.
+    orderId: t.orderId && (t.identityVerified || !(await staffLinkedOrder(t.id))) ? t.orderId : null,
     createdAt: t.createdAt.toISOString(),
     awaitingCustomer: status === "AWAITING_CUSTOMER" || status === "RESOLUTION_PROPOSED",
     canReply: status !== "CLOSED",
@@ -577,6 +579,32 @@ export async function setTicketPriority(t: SupportTicketRow, staffEmail: string,
     .set({ priority, priorityReason: `Manual: ${reason}`.slice(0, 200), firstResponseDueAt: due.firstResponseDueAt, resolutionDueAt: due.resolutionDueAt, updatedAt: now })
     .where(eq(supportTickets.id, t.id));
   await logEvent(t.id, "PRIORITY_CHANGED", staffEmail, { from: t.priority, to: priority, reason });
+}
+
+/**
+ * Attach the order a ticket is about when the customer didn't give one.
+ * Only fills an empty slot (a ticket never silently changes order) and never
+ * marks the ticket verified — the customer view keeps the order hidden.
+ */
+export async function linkTicketOrder(t: SupportTicketRow, staffEmail: string, orderId: string, matched: string[], now = new Date()) {
+  const [order] = await db.select({ id: orders.id, siteId: orders.siteId }).from(orders).where(eq(orders.id, orderId));
+  if (!order || order.siteId !== t.siteId) throw new TicketError("No order with that ID on this store.");
+  const updated = await db
+    .update(supportTickets)
+    .set({ orderId: order.id, updatedAt: now })
+    .where(and(eq(supportTickets.id, t.id), isNull(supportTickets.orderId)))
+    .returning({ id: supportTickets.id });
+  if (updated.length === 0) throw new TicketError("This ticket is already linked to an order.");
+  await logEvent(t.id, "ORDER_LINKED", staffEmail, { orderId: order.id, matched });
+}
+
+async function staffLinkedOrder(ticketId: string): Promise<boolean> {
+  const [e] = await db
+    .select({ id: supportTicketEvents.id })
+    .from(supportTicketEvents)
+    .where(and(eq(supportTicketEvents.ticketId, ticketId), eq(supportTicketEvents.type, "ORDER_LINKED")))
+    .limit(1);
+  return !!e;
 }
 
 // ---------------------------------------------------------------------------

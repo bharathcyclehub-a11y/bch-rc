@@ -6,8 +6,8 @@ import { ArrowRight, Film, Lock, MessageCircle, Phone, ShieldAlert } from "lucid
 import { requireAdmin } from "@/lib/admin-auth";
 import { formatDateTimeShort, formatPhone, formatRelative, initialsOf, requestTime, telHref, whatsappHref } from "@/lib/admin/format";
 import { can } from "@/lib/admin/permissions";
-import { PAYMENT_METHOD_LABEL, paymentStateMeta } from "@/lib/admin/status";
-import { isMissingTableError, listAdmins, loadTicketDetail, type TicketDetail } from "@/lib/support/admin-queries";
+import { orderStatusMeta, PAYMENT_METHOD_LABEL, paymentStateMeta } from "@/lib/admin/status";
+import { findContactOrders, isMissingTableError, listAdmins, loadTicketDetail, type TicketDetail } from "@/lib/support/admin-queries";
 import { loadPolicy } from "@/lib/support/config";
 import { EVIDENCE_ACCEPT } from "@/lib/support/evidence";
 import { onlineRefundable } from "@/lib/support/refunds";
@@ -36,6 +36,7 @@ import {
 } from "../../ticket-ui";
 import { ClaimActions } from "./ClaimActions";
 import { Composer } from "./Composer";
+import { LinkOrder, type OrderLead } from "./LinkOrder";
 import { RefundCaseActions, RequestRefundButton } from "./RefundActions";
 import { TicketActions } from "./TicketActions";
 
@@ -65,6 +66,18 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
   if (!detail || !ctx.siteIds.includes(detail.ticket.siteId)) notFound();
 
   const { ticket: t, messages, attachments, events, claims, refunds, order, customer } = detail;
+  // No order on the ticket: list the customer's orders by phone / email so staff can pick it.
+  const leads: OrderLead[] = order
+    ? []
+    : (await findContactOrders(t)).map((o) => ({
+        id: o.id,
+        placed: formatDateTimeShort(o.createdAt),
+        status: orderStatusMeta(o.status).label,
+        total: formatINR(o.totalInr),
+        payment: PAYMENT_METHOD_LABEL[o.paymentMethod] ?? o.paymentMethod,
+        items: o.items,
+        matches: o.matches,
+      }));
   const perm = {
     reply: can(ctx.role, "support.reply"),
     assign: can(ctx.role, "support.assign"),
@@ -183,7 +196,17 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
         {/* ── Sidebar ──────────────────────────────────────────────────── */}
         <div className="space-y-4">
           <CustomerPanel t={t} customer={customer} />
-          {order && <OrderPanel order={order} />}
+          {order ? (
+            <OrderPanel order={order} />
+          ) : (
+            <Panel>
+              <PanelHeader
+                title="Which order is this about?"
+                description={leads.length ? "Orders placed with this ticket's phone or email — newest first" : undefined}
+              />
+              <LinkOrder ticketId={t.id} leads={leads} canLink={perm.reply && t.status !== "CLOSED"} />
+            </Panel>
+          )}
           {order && (
             <Suspense fallback={<PanelSkeleton title="Tracking" />}>
               <TrackingPanel orderId={order.id} />

@@ -24,7 +24,7 @@ import { admins, orders, type RefundCaseRow, type SupportClaimRow, type SupportT
 import { requireAdmin, type AdminContext } from "@/lib/admin-auth";
 import { can, type AdminPermission } from "@/lib/admin/permissions";
 import { logError } from "@/lib/logger";
-import { isMissingTableError, isUuid, liveStock } from "@/lib/support/admin-queries";
+import { findContactOrders, isMissingTableError, isUuid, liveStock } from "@/lib/support/admin-queries";
 import {
   ClaimError,
   completeClaim,
@@ -45,10 +45,12 @@ import {
   requestRefund,
 } from "@/lib/support/refunds";
 import { canStaffMove, isTicketStatus, type Priority, type TicketStatus } from "@/lib/support/rules";
+import { normaliseOrderId, ORDER_ID_RE } from "@/lib/support/verify";
 import {
   assignTicket,
   escalateTicket,
   getTicketById,
+  linkTicketOrder,
   setTicketPriority,
   setTicketStatus,
   staffReply,
@@ -209,6 +211,23 @@ export async function escalateAction(ticketId: string, reason: string): Promise<
     return { ok: true, message: "Escalated — the team has been alerted" };
   } catch (err) {
     return fail("admin:support:escalate", err);
+  }
+}
+
+export async function linkOrderAction(ticketId: string, rawOrderId: string): Promise<DeskResult> {
+  const ctx = await gate("support.reply");
+  if (!ctx) return DENIED("link orders to tickets");
+  try {
+    const ticket = await scopedTicket(ctx, ticketId);
+    if (!ticket) return NOT_FOUND;
+    const orderId = normaliseOrderId(rawOrderId);
+    if (!ORDER_ID_RE.test(orderId)) return { ok: false, error: "Order IDs look like PRC-XXXXXXXX." };
+    const lead = (await findContactOrders(ticket, 20)).find((o) => o.id === orderId);
+    await linkTicketOrder(ticket, ctx.email, orderId, lead?.matches.length ? lead.matches : ["manual"]);
+    refresh(ticket.id, orderId);
+    return { ok: true, message: `${orderId} linked to this ticket` };
+  } catch (err) {
+    return fail("admin:support:link-order", err);
   }
 }
 
