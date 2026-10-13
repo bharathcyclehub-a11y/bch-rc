@@ -2,6 +2,7 @@ import Form from "next/form";
 import Link from "next/link";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { LiveSearchField } from "./LiveSearchField";
 
 export const SEARCH_INPUT_CLASS =
   "h-9 w-full rounded-lg border border-admin-line-strong bg-white pl-9 pr-9 text-sm text-brand-ink placeholder:text-admin-muted focus:border-brand-ink focus:outline-none focus:ring-2 focus:ring-brand-red/20 max-md:h-11 [&::-webkit-search-cancel-button]:hidden";
@@ -45,7 +46,8 @@ export function SearchInput({
 }
 
 /**
- * URL search box for server-rendered lists. A GET form (next/form → client
+ * URL search box for server-rendered lists, searching as you type (LiveSearchField)
+ * plus Enter. A GET form (next/form → client
  * navigation) so the query lives in the URL: shareable and back-button safe.
  * `keep` carries the other list params (view, filters) through a search.
  */
@@ -70,14 +72,12 @@ export function SearchForm({
     <Form action={action} role="search" className={cn("relative flex min-w-0 flex-1 items-center", className)}>
       {Object.entries(keep).map(([k, v]) => (v ? <input key={k} type="hidden" name={k} value={v} /> : null))}
       <Search size={15} aria-hidden className="pointer-events-none absolute left-3 text-admin-muted" />
-      <input
-        key={defaultValue}
-        type="search"
+      <LiveSearchField
+        action={action}
         name={name}
         defaultValue={defaultValue}
         placeholder={placeholder}
-        aria-label={placeholder}
-        enterKeyHint="search"
+        keep={keep}
         className={SEARCH_INPUT_CLASS}
       />
       {defaultValue && (
