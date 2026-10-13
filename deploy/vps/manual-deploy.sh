@@ -10,7 +10,7 @@
 # bundle BEFORE switching (12 Oct 2026 incident), then runs the repo's
 # remote-deploy.sh (switch, health-check, automatic rollback). The env comes
 # from /var/www/bch-rc/shared/.env as it is — this script never rewrites it.
-# Crons are already in root's crontab and are left as they are.
+# remote-deploy.sh (re)installs the managed crons — INSTALL_CRONS=true below.
 set -euo pipefail
 SHA="${1:?usage: manual-deploy.sh <full-git-sha>}"
 APP_DIR=/var/www/bch-rc
@@ -52,7 +52,10 @@ echo "$SHA" > "$B/REVISION"
 mkdir -p "$APP_DIR/incoming"
 tar -czf "$APP_DIR/incoming/release.tgz" -C "$B" .
 cp deploy/vps/remote-deploy.sh "$APP_DIR/incoming/"
-APP_DIR="$APP_DIR" APP_PORT=3000 bash "$APP_DIR/incoming/remote-deploy.sh" "$SHA"
+# INSTALL_CRONS=true is required: remote-deploy.sh REWRITES the crontab and,
+# without it, drops the managed reconcile / sync-shipments / analytics jobs
+# (13 Oct 2026: a manual deploy without it removed them).
+APP_DIR="$APP_DIR" APP_PORT=3000 INSTALL_CRONS=true bash "$APP_DIR/incoming/remote-deploy.sh" "$SHA"
 echo "live revision: $(cat "$APP_DIR/current/REVISION")"
 (cd "$APP_DIR/current" && node -e "require('sharp'); console.log('live sharp OK')")
 echo "courier webhook route: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/webhooks/delhivery) (200 = new code live)"
