@@ -428,6 +428,13 @@ export async function listTicketsForAdmin(siteIds: string[], me: string, query: 
         resolvedAt: supportTickets.resolvedAt,
         updatedAt: supportTickets.updatedAt,
         createdAt: supportTickets.createdAt,
+        twins: sql<number>`(
+          select count(*)::int from support_tickets t2
+          where t2.id <> ${supportTickets.id} and t2.site_id = ${supportTickets.siteId} and t2.status in (${OPEN_SQL})
+            and ((t2.order_id = ${supportTickets.orderId})
+              or (lower(t2.contact_email) = lower(${supportTickets.contactEmail}))
+              or (length(${last10(sql`${supportTickets.contactPhone}`)}) = 10 and ${last10(sql`t2.contact_phone`)} = ${last10(sql`${supportTickets.contactPhone}`)}))
+        )`,
       })
       .from(supportTickets)
       .leftJoin(customers, eq(customers.id, supportTickets.customerId))
@@ -496,20 +503,8 @@ export async function loadTicketDetail(id: string) {
           .from(customers)
           .where(eq(customers.id, ticket.customerId))
       : Promise.resolve([]),
-    // Other open tickets about the same order — likely duplicates to merge.
-    ticket.orderId
-      ? db
-          .select({
-            id: supportTickets.id,
-            number: supportTickets.number,
-            category: supportTickets.category,
-            status: supportTickets.status,
-            createdAt: supportTickets.createdAt,
-          })
-          .from(supportTickets)
-          .where(and(eq(supportTickets.orderId, ticket.orderId), ne(supportTickets.id, ticket.id), inArray(supportTickets.status, [...OPEN_STATUSES])))
-          .orderBy(asc(supportTickets.createdAt))
-      : Promise.resolve([]),
+    // Other open tickets from the same customer — same order, email or phone.
+    openTwins(ticket),
   ]);
 
   return {
@@ -526,6 +521,44 @@ export async function loadTicketDetail(id: string) {
 }
 
 export type TicketDetail = NonNullable<Awaited<ReturnType<typeof loadTicketDetail>>>;
+
+const OPEN_SQL = sql.raw(OPEN_STATUSES.map((s) => `'${s}'`).join(", "));
+
+/**
+ * Other open tickets on the same store that look like the same customer's
+ * same problem: same order, same email or same phone — most likely
+ * duplicates to merge. `why` says which matched.
+ */
+async function openTwins(t: SupportTicketRow) {
+  const email = t.contactEmail?.trim().toLowerCase() || null;
+  const phone = digits10(t.contactPhone);
+  const byOrder = t.orderId ? sql`${supportTickets.orderId} = ${t.orderId}` : null;
+  const byEmail = email ? sql`lower(${supportTickets.contactEmail}) = ${email}` : null;
+  const byPhone = phone.length === 10 ? sql`${last10(sql`${supportTickets.contactPhone}`)} = ${phone}` : null;
+  const any = [byOrder, byEmail, byPhone].filter((c): c is SQL => !!c);
+  if (any.length === 0) return [];
+  const rows = await db
+    .select({
+      id: supportTickets.id,
+      number: supportTickets.number,
+      category: supportTickets.category,
+      status: supportTickets.status,
+      orderId: supportTickets.orderId,
+      identityVerified: supportTickets.identityVerified,
+      createdAt: supportTickets.createdAt,
+      sameOrder: sql<boolean>`${byOrder ?? sql`false`}`,
+      sameEmail: sql<boolean>`${byEmail ?? sql`false`}`,
+      samePhone: sql<boolean>`${byPhone ?? sql`false`}`,
+    })
+    .from(supportTickets)
+    .where(and(eq(supportTickets.siteId, t.siteId), ne(supportTickets.id, t.id), inArray(supportTickets.status, [...OPEN_STATUSES]), or(...any)))
+    .orderBy(asc(supportTickets.createdAt))
+    .limit(10);
+  return rows.map(({ sameOrder, sameEmail, samePhone, ...r }) => ({
+    ...r,
+    why: [sameOrder ? "same order" : "", sameEmail ? "same email" : "", samePhone ? "same phone" : ""].filter(Boolean),
+  }));
+}
 
 /** Current sellable stock for one SKU/variant (null = no inventory row). */
 export async function liveStock(siteId: string, skuId: string, variantSlug: string | null): Promise<number | null> {

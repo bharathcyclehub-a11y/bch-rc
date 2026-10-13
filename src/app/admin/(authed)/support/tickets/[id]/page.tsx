@@ -210,7 +210,7 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
           )}
           {siblings.length > 0 && (
             <Panel>
-              <PanelHeader title="Other open tickets for this order" description="Probably the same problem — merge them so the customer gets one answer" />
+              <PanelHeader title="Other open tickets from this customer" description="Same order, email or phone — merge duplicates so the customer gets one answer" />
               <ul className="divide-y divide-admin-line">
                 {siblings.map((s) => (
                   <li key={s.id} className="flex items-center gap-3 px-4 py-2.5 text-[13px] sm:px-5">
@@ -221,9 +221,13 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
                       <p className="truncate text-xs text-admin-muted">
                         {categoryLabel(s.category)} · {ticketStatusLabel(s.status)} · opened {formatRelative(s.createdAt, now.getTime()).toLowerCase()}
                       </p>
+                      <p className="truncate text-xs text-admin-muted">
+                        {s.why.join(" + ")}
+                        {!s.identityVerified && <> · <span className="text-tone-warn">not verified</span></>}
+                      </p>
                     </div>
                     {perm.reply && t.status !== "CLOSED" && (
-                      <MergeDuplicate keepId={t.id} keepNumber={t.number} duplicateId={s.id} duplicateNumber={s.number} />
+                      <MergeDuplicate keepId={t.id} keepNumber={t.number} duplicateId={s.id} duplicateNumber={s.number} unverified={!s.identityVerified && !s.why.includes("same order")} />
                     )}
                   </li>
                 ))}

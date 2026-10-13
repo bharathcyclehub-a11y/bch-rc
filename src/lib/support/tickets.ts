@@ -123,24 +123,6 @@ export async function createTicket(input: CreateTicketInput): Promise<CreatedTic
   const contactName = (input.contact.name ?? addr.fullName ?? "").trim() || null;
   if (!contactEmail && !contactPhone) throw new TicketError("Add an email or phone number so we can reply.");
 
-  // One open ticket per order and problem: a customer who asks again (double
-  // submit, impatience, chat after the form) is added to the ticket they have.
-  if (!staff && order) {
-    const twin = await openTicketFor(order.id, input.category, input.skuId ?? null);
-    if (twin) {
-      await addCustomerMessage(twin, description, input.files ?? [], now);
-      return {
-        id: twin.id,
-        number: twin.number,
-        accessToken: null,
-        existing: true,
-        priority: twin.priority as Priority,
-        status: twin.status as TicketStatus,
-        claimNumber: null,
-      };
-    }
-  }
-
   // Courier facts for the priority rules.
   let trackingDelivered = false;
   let estimateExpired = false;
@@ -157,6 +139,39 @@ export async function createTicket(input: CreateTicketInput): Promise<CreatedTic
     estimateExpired,
   });
   const sla = await loadSla();
+
+  // One open ticket per order: a follow-up about an order that already has an
+  // open ticket (double submit, chat after the form, another worry about the
+  // same parcel) joins it, and lifts its priority if it's more urgent. A new
+  // claim (damaged / wrong item…) or a safety report still gets its own ticket
+  // — claims need their own record, safety its own escalation.
+  if (!staff && order && priority !== "CRITICAL") {
+    const twin = await openTicketFor(order.id, input.category, input.skuId ?? null, !!cat.claimReason);
+    if (twin) {
+      const body = twin.category === input.category ? description : `(${cat.label}) ${description}`;
+      await addCustomerMessage(twin, body, input.files ?? [], now);
+      const lifted = higherPriority(twin.priority as Priority, priority);
+      if (lifted !== twin.priority) {
+        const d = slaDueDates(lifted, twin.createdAt, sla);
+        const why = `Follow-up: ${reason}`.slice(0, 200);
+        await db
+          .update(supportTickets)
+          .set({ priority: lifted, priorityReason: why, firstResponseDueAt: d.firstResponseDueAt, resolutionDueAt: d.resolutionDueAt, updatedAt: now })
+          .where(eq(supportTickets.id, twin.id));
+        await logEvent(twin.id, "PRIORITY_CHANGED", "system", { from: twin.priority, to: lifted, reason: why });
+      }
+      return {
+        id: twin.id,
+        number: twin.number,
+        accessToken: null,
+        existing: true,
+        priority: lifted,
+        status: twin.status as TicketStatus,
+        claimNumber: null,
+      };
+    }
+  }
+
   const due = slaDueDates(priority, now, sla);
   const productName = input.skuId ? (getProductById(input.skuId)?.name ?? null) : null;
   const subject =
@@ -619,17 +634,21 @@ export async function linkTicketOrder(t: SupportTicketRow, staffEmail: string, o
   await logEvent(t.id, "ORDER_LINKED", staffEmail, { orderId: order.id, matched });
 }
 
-/** The oldest still-open ticket about this order, problem and item, if any. */
-async function openTicketFor(orderId: string, category: string, skuId: string | null): Promise<SupportTicketRow | null> {
+/**
+ * The oldest still-open ticket a new request about this order should join:
+ * any open ticket on the order, or — for a new claim — one for the same
+ * problem and item (a different claim needs its own record).
+ */
+async function openTicketFor(orderId: string, category: string, skuId: string | null, claim: boolean): Promise<SupportTicketRow | null> {
   const [t] = await db
     .select()
     .from(supportTickets)
     .where(
       and(
         eq(supportTickets.orderId, orderId),
-        eq(supportTickets.category, category),
-        skuId ? eq(supportTickets.skuId, skuId) : isNull(supportTickets.skuId),
         inArray(supportTickets.status, [...OPEN_STATUSES]),
+        claim ? eq(supportTickets.category, category) : undefined,
+        claim ? (skuId ? eq(supportTickets.skuId, skuId) : isNull(supportTickets.skuId)) : undefined,
       ),
     )
     .orderBy(asc(supportTickets.createdAt))
@@ -646,6 +665,9 @@ export async function mergeDuplicateTicket(dup: SupportTicketRow, keep: SupportT
   if (dup.id === keep.id) throw new TicketError("Pick a different ticket to merge into.");
   if (dup.siteId !== keep.siteId) throw new TicketError("Both tickets must be on the same store.");
   if (dup.status === "CLOSED" || keep.status === "CLOSED") throw new TicketError("Closed tickets can't be merged.");
+  if (dup.orderId && keep.orderId && dup.orderId !== keep.orderId) {
+    throw new TicketError(`${dup.number} is about a different order (${dup.orderId}) — reply to it separately.`);
+  }
   const [claim] = await db.select({ id: supportClaims.id }).from(supportClaims).where(eq(supportClaims.ticketId, dup.id)).limit(1);
   const [refund] = await db.select({ id: refundCases.id }).from(refundCases).where(eq(refundCases.ticketId, dup.id)).limit(1);
   if (claim || refund) throw new TicketError(`${dup.number} has its own claim or refund — handle it there instead of merging.`);
@@ -678,7 +700,14 @@ export async function mergeDuplicateTicket(dup: SupportTicketRow, keep: SupportT
       .set({ status: "CLOSED", closedAt: now, awaiting: "NONE", updatedAt: now })
       .where(eq(supportTickets.id, dup.id));
     const lastCustomer = [keep.lastCustomerMessageAt, dup.lastCustomerMessageAt].filter((d): d is Date => !!d).sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
-    await tx.update(supportTickets).set({ lastCustomerMessageAt: lastCustomer, updatedAt: now }).where(eq(supportTickets.id, keep.id));
+    // The kept ticket inherits the duplicate's order if it had none. Logged as
+    // a staff link, so an unverified customer view keeps it hidden.
+    const inherit = !keep.orderId && dup.orderId ? dup.orderId : null;
+    await tx
+      .update(supportTickets)
+      .set({ lastCustomerMessageAt: lastCustomer, updatedAt: now, ...(inherit ? { orderId: inherit } : {}) })
+      .where(eq(supportTickets.id, keep.id));
+    if (inherit) await tx.insert(supportTicketEvents).values({ ticketId: keep.id, type: "ORDER_LINKED", actor: staffEmail, payload: { orderId: inherit, matched: ["merge"] } });
     await tx.insert(supportTicketEvents).values([
       { ticketId: dup.id, type: "MERGED_INTO", actor: staffEmail, payload: { number: keep.number } },
       { ticketId: keep.id, type: "MERGED_FROM", actor: staffEmail, payload: { number: dup.number, messages: msgs.length } },

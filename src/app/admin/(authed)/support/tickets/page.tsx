@@ -13,8 +13,9 @@ import {
   type TicketListRow,
   type TicketView,
 } from "@/lib/support/admin-queries";
-import { CATEGORY_KEYS, TICKET_CATEGORIES, type Priority } from "@/lib/support/rules";
+import { CATEGORY_KEYS, OPEN_STATUSES, TICKET_CATEGORIES, type Priority, type TicketStatus } from "@/lib/support/rules";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/admin/Badge";
 import { ButtonLink } from "@/components/admin/Button";
 import { FilterChip } from "@/components/admin/Chip";
 import { EmptyState } from "@/components/admin/EmptyState";
@@ -215,6 +216,7 @@ function TicketsTable({ rows, now }: { rows: TicketListRow[]; now: Date }) {
                 <div className="flex items-center gap-1.5">
                   <RowLink href={`/admin/support/tickets/${t.id}`} className="font-mono text-[13px]">{t.number}</RowLink>
                   {t.safetyFlag && <ShieldAlert size={14} className="shrink-0 text-tone-neg" aria-label="Safety hazard reported" />}
+                  {possibleDuplicate(t) && <Badge tone="attention">Possible duplicate</Badge>}
                 </div>
                 <div className="truncate text-xs text-brand-ink-soft" title={t.subject}>{t.subject}</div>
               </TD>
@@ -266,6 +268,7 @@ function TicketCards({ rows, now }: { rows: TicketListRow[]; now: Date }) {
                 <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">
                   <PriorityBadge priority={t.priority} />
                   <TicketStatusBadge status={t.status} />
+                  {possibleDuplicate(t) && <Badge tone="attention">Possible duplicate</Badge>}
                 </div>
                 <p className="mt-1.5 truncate text-xs text-admin-muted">
                   {name}
@@ -335,4 +338,9 @@ function first(v: string | string[] | undefined): string {
 
 function fmt(n: number): string {
   return n.toLocaleString("en-IN");
+}
+
+/** Another open ticket shares this one's order, email or phone. */
+function possibleDuplicate(t: { twins: number; status: string }): boolean {
+  return t.twins > 0 && OPEN_STATUSES.includes(t.status as TicketStatus);
 }

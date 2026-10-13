@@ -231,6 +231,37 @@ describe("duplicate tickets", () => {
     assert.equal((await db.select().from(supportTickets).where(eq(supportTickets.orderId, o.id))).length, 1);
   });
 
+  it("a follow-up of another kind joins and lifts priority; a new claim and a guest ticket stay separate", async () => {
+    const o = await makeOrder({ status: "DELIVERED", deliveredDaysAgo: 1 });
+    const ask = (category: string, description: string) =>
+      m.tickets.createTicket({ category, description, orderId: o.id, contact: {}, verifiedCustomerId: o.customerId, actor: "customer" });
+    const general = await ask("GENERAL", "When will my order arrive please");
+    assert.equal(general.priority, "LOW");
+    const followUp = await ask("DELIVERY_DELAYED", "It is taking far too long now");
+    assert.equal(followUp.existing, true);
+    assert.equal(followUp.number, general.number);
+    assert.equal(followUp.priority, "MEDIUM");
+    const { db } = m.dbmod;
+    const { supportTicketMessages, supportTickets } = m.schema;
+    const { eq } = m.orm;
+    const [row] = await db.select().from(supportTickets).where(eq(supportTickets.id, general.id));
+    assert.equal(row.priority, "MEDIUM");
+    const msgs = await db.select().from(supportTicketMessages).where(eq(supportTicketMessages.ticketId, general.id));
+    assert.ok(msgs.some((x: any) => x.body.startsWith("(Delivery delayed)")));
+
+    const claim = await ask("DAMAGED_PRODUCT", "The shell arrived cracked in two places");
+    assert.equal(claim.existing, false);
+
+    // A guest ticket with the order's email (no order, unverified) is shown to staff, not auto-joined.
+    const guest = await m.tickets.createTicket({ category: "GENERAL", description: "Any update on my parcel please", contact: { name: "Guest", email: o.email }, actor: "customer" });
+    assert.equal(guest.existing, false);
+    const detail = await m.adminQueries.loadTicketDetail(general.id);
+    const twin = detail.siblings.find((x: any) => x.id === guest.id);
+    assert.ok(twin, "guest ticket listed as a possible duplicate");
+    assert.deepEqual(twin.why, ["same email"]);
+    assert.equal(twin.identityVerified, false);
+  });
+
   it("staff merge moves the messages and closes the duplicate", async () => {
     const o = await makeOrder({ status: "SHIPPED" });
     const raise = (description: string) =>
