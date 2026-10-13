@@ -48,6 +48,7 @@ export default async function TicketPage({ params, searchParams }: { params: Pro
   const number = rawNumber.trim().toUpperCase().slice(0, 12);
   const token = first(sp.k).slice(0, 64) || null;
   const created = first(sp.created) === "1";
+  const added = first(sp.added) === "1";
 
   const session = await getSupportSession();
   const row = await findTicketForCustomer(number, { sessionCustomerId: session?.customerId ?? null, token });
@@ -62,6 +63,11 @@ export default async function TicketPage({ params, searchParams }: { params: Pro
   return (
     <SupportShell crumbs={[{ label: "Tickets", href: "/support/tickets" }, { label: view.number }]}>
       <div className="max-w-3xl mx-auto px-4 py-8 sm:py-12 space-y-6">
+        {added && (
+          <Notice tone="success" role="status" title={`Added to your request ${view.number}`}>
+            You already had an open request about this, so we&apos;ve added your message here — no need to raise another. Our team sees it all together.
+          </Notice>
+        )}
         {created && (
           <Notice tone="success" role="status" title={`Request ${view.number} received`}>
             We&apos;ve emailed you a private link to this page. Keep it to check progress, reply or add photos.
