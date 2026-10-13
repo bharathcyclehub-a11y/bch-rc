@@ -11,7 +11,14 @@ import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { orders, shipmentTracking, shipmentTrackingEvents, webhooksInbound } from "@/db/schema";
-import { baseOrderId, parseShiprocketWebhook, type ShiprocketWebhook } from "./carrier";
+import {
+  baseOrderId,
+  parseDelhiveryWebhook,
+  parseShiprocketWebhook,
+  type CarrierSnapshot,
+  type DelhiveryWebhook,
+  type ShiprocketWebhook,
+} from "./carrier";
 import { normalizeCarrierStatus } from "./status";
 import { applyIngestEffects, ingestSnapshot, loadTrackingRow } from "./ingest";
 import { assessRow, loadOrderForEstimate, raiseException, reconcileExceptions } from "./exceptions";
@@ -119,7 +126,15 @@ async function findTrackingId(e: ShiprocketWebhook): Promise<string | null> {
     const isCancel = normalizeCarrierStatus(e.current_status ?? e.shipment_status) === "CANCELLED";
     if (seen || isCancel) return fwd.id;
     if (REPOINTABLE.has(fwd.status) || cloned) {
-      await repointTracking(fwd.id, awb, cloned ? "Shiprocket clone (re-ship)" : "new AWB from courier webhook");
+      // This webhook is Shiprocket's, so the new AWB is a Shiprocket booking —
+      // even when the order was first booked on Delhivery.
+      await repointTracking(
+        fwd.id,
+        awb,
+        cloned ? "Shiprocket clone (re-ship)" : "new AWB from courier webhook",
+        new Date(),
+        "shiprocket",
+      );
       return fwd.id;
     }
     await db
@@ -153,40 +168,109 @@ export async function processStoredWebhook(
       return { matched: false };
     }
 
-    const snap = parseShiprocketWebhook(event);
-    const outcome = await ingestSnapshot(trackingId, snap, "WEBHOOK", now);
-    await applyIngestEffects(outcome, { notify, now });
-
-    const cfg = await loadTrackingConfig();
-    const fresh = await loadTrackingRow(trackingId);
-    if (fresh) {
-      if (outcome.correction) {
-        await raiseException({
-          siteId: fresh.siteId,
-          orderId: fresh.orderId,
-          trackingId: fresh.id,
-          type: "CARRIER_CORRECTION",
-          severity: "HIGH",
-          detail: `Courier changed a final status from ${outcome.previousStatus} to ${outcome.status}.`,
-          now,
-        });
-      }
-      const order = await loadOrderForEstimate(fresh.orderId);
-      await reconcileExceptions(fresh, assessRow(fresh, order, now, cfg), { now, notify: notify && outcome.wasBaselined });
-    }
-
-    await db
-      .update(webhooksInbound)
-      .set({ processed: true, processedAt: now, error: null, attempts: sql`${webhooksInbound.attempts} + 1` })
-      .where(eq(webhooksInbound.id, rowId));
+    await ingestWebhookSnapshot(trackingId, parseShiprocketWebhook(event), now, notify);
+    await markWebhook(rowId, now, null);
     return { matched: true };
   } catch (err) {
-    const error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
-    await db
-      .update(webhooksInbound)
-      .set({ error, attempts: sql`${webhooksInbound.attempts} + 1` })
-      .where(eq(webhooksInbound.id, rowId))
-      .catch(() => {});
-    return { matched: false, error: `${externalId}: ${error}` };
+    return failWebhook(rowId, externalId, err);
+  }
+}
+
+/** Ingest one webhook snapshot, then run the same follow-ups as a poll. */
+async function ingestWebhookSnapshot(trackingId: string, snap: CarrierSnapshot, now: Date, notify: boolean): Promise<void> {
+  const outcome = await ingestSnapshot(trackingId, snap, "WEBHOOK", now);
+  await applyIngestEffects(outcome, { notify, now });
+
+  const cfg = await loadTrackingConfig();
+  const fresh = await loadTrackingRow(trackingId);
+  if (fresh) {
+    if (outcome.correction) {
+      await raiseException({
+        siteId: fresh.siteId,
+        orderId: fresh.orderId,
+        trackingId: fresh.id,
+        type: "CARRIER_CORRECTION",
+        severity: "HIGH",
+        detail: `Courier changed a final status from ${outcome.previousStatus} to ${outcome.status}.`,
+        now,
+      });
+    }
+    const order = await loadOrderForEstimate(fresh.orderId);
+    await reconcileExceptions(fresh, assessRow(fresh, order, now, cfg), { now, notify: notify && outcome.wasBaselined });
+  }
+}
+
+async function markWebhook(rowId: string, now: Date, error: string | null): Promise<void> {
+  await db
+    .update(webhooksInbound)
+    .set({ processed: true, processedAt: now, error, attempts: sql`${webhooksInbound.attempts} + 1` })
+    .where(eq(webhooksInbound.id, rowId));
+}
+
+async function failWebhook(rowId: string, externalId: string, err: unknown): Promise<{ matched: false; error: string }> {
+  const error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+  await db
+    .update(webhooksInbound)
+    .set({ error, attempts: sql`${webhooksInbound.attempts} + 1` })
+    .where(eq(webhooksInbound.id, rowId))
+    .catch(() => {});
+  return { matched: false, error: `${externalId}: ${error}` };
+}
+
+// ── Delhivery scan push ─────────────────────────────────────────────────────
+
+/** Dedup key for a Delhivery scan push: one status change of one waybill. */
+export function delhiveryWebhookExternalId(e: DelhiveryWebhook): string {
+  const s = e.Shipment ?? {};
+  const key = [
+    String(s.AWB ?? ""),
+    s.Status?.StatusType ?? "",
+    s.Status?.Status ?? "",
+    s.Status?.StatusDateTime ?? "",
+    s.NSLCode ?? "",
+  ].join("|");
+  return `dl:${createHash("sha256").update(key).digest("hex").slice(0, 48)}`;
+}
+
+/**
+ * Process one stored Delhivery push. Only Delhivery bookings are matched —
+ * by waybill on the tracking row, else by our order id (ReferenceNo) on an
+ * order booked with Delhivery. Never throws (same contract as Shiprocket's).
+ */
+export async function processStoredDelhiveryWebhook(
+  rowId: string,
+  externalId: string,
+  payload: unknown,
+  now: Date = new Date(),
+  notify = true,
+): Promise<{ matched: boolean; error?: string }> {
+  try {
+    const event = (payload ?? {}) as DelhiveryWebhook;
+    const snap = parseDelhiveryWebhook(event);
+    const awb = snap?.awb ?? "";
+    let trackingId: string | null = null;
+    if (awb) {
+      const [t] = await db
+        .select({ id: shipmentTracking.id })
+        .from(shipmentTracking)
+        .where(and(eq(shipmentTracking.awbCode, awb), eq(shipmentTracking.courierProvider, "delhivery")));
+      trackingId = t?.id ?? null;
+      if (!trackingId) {
+        const [o] = await db
+          .select({ id: orders.id })
+          .from(orders)
+          .where(and(eq(orders.awbCode, awb), eq(orders.courierProvider, "delhivery")));
+        trackingId = o ? ((await ensureForwardTracking(o.id, now))?.id ?? null) : null;
+      }
+    }
+    if (!snap || !trackingId) {
+      await markWebhook(rowId, now, "No matching Delhivery shipment");
+      return { matched: false };
+    }
+    await ingestWebhookSnapshot(trackingId, snap, now, notify);
+    await markWebhook(rowId, now, null);
+    return { matched: true };
+  } catch (err) {
+    return failWebhook(rowId, externalId, err);
   }
 }

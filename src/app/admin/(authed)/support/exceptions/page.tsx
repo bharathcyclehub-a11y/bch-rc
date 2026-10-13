@@ -7,8 +7,9 @@ import { requireAdmin } from "@/lib/admin-auth";
 import { formatRelative, requestTime } from "@/lib/admin/format";
 import { can } from "@/lib/admin/permissions";
 import { formatINR } from "@/lib/utils";
+import { COURIER_PROVIDER_LABEL, COURIER_PROVIDERS } from "@/lib/couriers";
+import { circuitState } from "@/lib/couriers/health";
 import { EXCEPTION_TYPES, type ExceptionType } from "@/lib/tracking/assess";
-import { circuitState } from "@/lib/tracking/sync";
 import { formatIstDate, formatIstDateTime } from "@/lib/tracking/time";
 import { Badge, Tag } from "@/components/admin/Badge";
 import { ButtonLink } from "@/components/admin/Button";
@@ -82,14 +83,14 @@ export default async function ShipmentExceptionsPage({ searchParams }: { searchP
     );
   }
 
-  const { tabCounts, typeCounts, rows, capped, lastRun, lastWebhookAt, circuit } = data;
+  const { tabCounts, typeCounts, rows, capped, lastRun, lastWebhookAt, circuits } = data;
   const canResync = can(ctx.role, "tracking.resync");
   const canManage = can(ctx.role, "exceptions.manage");
   // "Just now" / "Yesterday" read mid-sentence in lower case; dates keep theirs.
   const rel = (d: Date) => formatRelative(d, now.getTime()).replace(/^(Just now|Yesterday)$/, (s) => s.toLowerCase());
   const synced = lastRun?.finishedAt ? `tracking last synced ${rel(lastRun.finishedAt)}` : "tracking never synced";
   const webhook = lastWebhookAt ? `last courier webhook ${rel(lastWebhookAt)}` : "no courier webhooks yet";
-  const skipped = !circuit && lastRun?.skippedReason ? lastRun.skippedReason : null;
+  const skipped = circuits.length === 0 && lastRun?.skippedReason ? lastRun.skippedReason : null;
 
   const tabTotal = tabCounts[state.tab];
   const chipTypes = EXCEPTION_TYPES.filter((t) => (typeCounts[t] ?? 0) > 0 || t === state.type);
@@ -114,20 +115,23 @@ export default async function ShipmentExceptionsPage({ searchParams }: { searchP
         actions={canResync ? <ResyncAllButton /> : undefined}
       />
 
-      {circuit && (
+      {/* One breaker per provider: a refusing Delhivery never pauses Shiprocket (and vice versa). */}
+      {circuits.map((c) => (
         <div
+          key={c.provider}
           role="status"
           className="mb-4 flex items-start gap-2.5 rounded-xl border border-tone-warn/25 bg-tone-warn-bg px-4 py-3 text-[13px] leading-5 text-tone-warn"
         >
           <CirclePause size={16} aria-hidden className="mt-0.5 shrink-0" />
           <p className="min-w-0 break-words">
             <span className="font-semibold">
-              Courier tracking paused until {formatIstDateTime(new Date(circuit.openUntil))}
+              {COURIER_PROVIDER_LABEL[c.provider]} calls paused until {formatIstDateTime(new Date(c.openUntil))}
             </span>{" "}
-            — {circuit.reason}. Scheduled and manual syncs resume on their own after that.
+            — {c.reason}. Tracking syncs resume on their own after that; until then routing treats it as
+            unavailable for new bookings.
           </p>
         </div>
-      )}
+      ))}
 
       <Tabs
         ariaLabel="Exception status"
@@ -198,7 +202,7 @@ async function loadExceptions(siteIds: string[], state: ListState, now: Date) {
     ? [desc(deliveryExceptions.resolvedAt)]
     : [asc(severityRank), asc(deliveryExceptions.openedAt)];
 
-  const [statusRows, typeRows, fetched, [lastRun], [webhookRow], circuit] = await Promise.all([
+  const [statusRows, typeRows, fetched, [lastRun], [webhookRow], circuitRows] = await Promise.all([
     db
       .select({ status: deliveryExceptions.status, n: count() })
       .from(deliveryExceptions)
@@ -262,9 +266,15 @@ async function loadExceptions(siteIds: string[], state: ListState, now: Date) {
     db
       .select({ at: max(webhooksInbound.createdAt) })
       .from(webhooksInbound)
-      .where(eq(webhooksInbound.source, "shiprocket")),
-    circuitState(now).catch(() => null),
+      .where(inArray(webhooksInbound.source, ["shiprocket", "delhivery"])),
+    Promise.all(
+      COURIER_PROVIDERS.map(async (provider) => {
+        const c = await circuitState(now, provider).catch(() => null);
+        return c ? { provider, ...c } : null;
+      }),
+    ),
   ]);
+  const circuits = circuitRows.filter((c) => c !== null);
 
   const tabCounts: Record<TabKey, number> = { open: 0, acknowledged: 0, resolved: 0 };
   for (const r of statusRows) {
@@ -281,7 +291,7 @@ async function loadExceptions(siteIds: string[], state: ListState, now: Date) {
     capped: fetched.length > ROW_CAP,
     lastRun: lastRun ?? null,
     lastWebhookAt: webhookRow?.at ?? null,
-    circuit,
+    circuits,
   };
 }
 

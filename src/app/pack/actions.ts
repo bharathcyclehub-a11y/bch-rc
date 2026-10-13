@@ -17,16 +17,17 @@
 import { revalidatePath } from "next/cache";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { orders, events, shipmentJobs } from "@/db/schema";
+import { orders, events, shipmentJobs, shipmentTracking } from "@/db/schema";
 import { isPackAuthenticated } from "@/lib/pack-auth";
-import {
-  generateShippingLabel,
-  generateManifest,
-  schedulePickup,
-  generateInvoice,
-} from "@/lib/shiprocket";
+import { generateManifest, schedulePickup, generateInvoice } from "@/lib/shiprocket";
+import { asCourierProvider, getCourierAdapter, shipmentRefOf } from "@/lib/couriers";
 import { releaseOrderHoldsBestEffort } from "@/lib/inventory/release";
 import { logError } from "@/lib/logger";
+
+/** Staff-facing name of the platform an order is booked on. */
+function providerName(courierProvider: string): string {
+  return asCourierProvider(courierProvider) === "delhivery" ? "Delhivery" : "Shiprocket";
+}
 
 /**
  * Touch every server route that displays this order's state. A single
@@ -64,7 +65,10 @@ export async function printLabelAction(
 
   const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
   if (!order) return { ok: false, error: "Order not found." };
-  if (!order.shiprocketShipmentId) {
+  const ref = shipmentRefOf(order);
+  const provider = asCourierProvider(order.courierProvider);
+  // Shiprocket labels by its shipment id; Delhivery by the waybill.
+  if (provider === "delhivery" ? !ref.awb : !ref.shipmentId) {
     return {
       ok: false,
       error: "AWB not yet assigned. Wait ~30 sec and retry.",
@@ -72,11 +76,11 @@ export async function printLabelAction(
   }
 
   try {
-    const { labelUrl } = await generateShippingLabel([order.shiprocketShipmentId]);
+    const { url: labelUrl } = await getCourierAdapter(provider).label(ref);
     if (!labelUrl) {
       return {
         ok: false,
-        error: "Shiprocket didn't return a label URL. Try again in a moment.",
+        error: `${providerName(order.courierProvider)} didn't return a label URL. Try again in a moment.`,
       };
     }
     return { ok: true, labelUrl };
@@ -101,11 +105,12 @@ export async function printManifestAction(): Promise<
   // Collect every order PACKED with an AWB that isn't yet handed to a
   // courier. We don't track "manifest_printed_at" yet, so the simple rule is
   // every PACKED-with-AWB row. The packing employee prints once at end-of-day
-  // before the courier visit.
+  // before the courier visit. Shiprocket bookings only — Delhivery has no
+  // manifest sheet.
   const rows = await db
     .select({ shipmentId: orders.shiprocketShipmentId })
     .from(orders)
-    .where(and(eq(orders.status, "PACKED")));
+    .where(and(eq(orders.status, "PACKED"), eq(orders.courierProvider, "shiprocket")));
 
   const shipmentIds = rows
     .map((r) => r.shipmentId)
@@ -139,12 +144,39 @@ export async function printManifestAction(): Promise<
 // ============================================================
 export async function printManifestForOrderAction(
   orderId: string,
-): Promise<ActionResult<{ manifestUrl: string }>> {
+): Promise<ActionResult<{ manifestUrl: string | null; note?: string }>> {
   const denied = await gate();
   if (denied) return denied;
 
   const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
   if (!order) return { ok: false, error: "Order not found." };
+  const provider = asCourierProvider(order.courierProvider);
+
+  // Delhivery has no manifest sheet to print: a booked shipment is already
+  // "Manifested" on Delhivery's side. Say so instead of pretending to print —
+  // the order still moves on to "Pickups & Manifests".
+  if (provider === "delhivery") {
+    if (!order.awbCode) return { ok: false, error: "Waybill not yet assigned." };
+    await db
+      .update(orders)
+      .set({ manifestedAt: new Date(), manifestUrl: null, updatedAt: new Date() })
+      .where(eq(orders.id, orderId));
+    await db.insert(events).values({
+      siteId: order.siteId,
+      orderId: order.id,
+      customerId: order.customerId,
+      type: "MANIFEST_GENERATED",
+      payload: { manifestUrl: null, provider, by: "pack-console" },
+      source: "operator",
+    });
+    revalidateOrderEverywhere(orderId);
+    return {
+      ok: true,
+      manifestUrl: null,
+      note: "Delhivery has no manifest sheet — the shipment was manifested when it was booked. Schedule the pickup next.",
+    };
+  }
+
   if (!order.shiprocketShipmentId) {
     return { ok: false, error: "AWB not yet assigned. Generate AWB first." };
   }
@@ -188,17 +220,17 @@ export async function schedulePickupForOrderAction(
 
   const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
   if (!order) return { ok: false, error: "Order not found." };
-  if (!order.shiprocketShipmentId) {
+  const provider = asCourierProvider(order.courierProvider);
+  const ref = shipmentRefOf(order);
+  if (provider === "delhivery" ? !ref.awb : !ref.shipmentId) {
     return { ok: false, error: "AWB not yet assigned. Generate AWB first." };
   }
 
-  const result = await schedulePickup([order.shiprocketShipmentId]);
-  // Shiprocket returns "Invalid Status" when pickup is already scheduled
-  // (premium couriers like Blue Dart Air auto-schedule). Treat that as a soft
-  // success — the pickup IS scheduled, just not by us.
-  const alreadyScheduled =
-    !result.ok && /invalid status|already/i.test(result.message);
-  if (!result.ok && !alreadyScheduled) {
+  // Shiprocket's "already scheduled" (premium couriers auto-schedule) and
+  // Delhivery's "pickup already requested for the day" both come back as
+  // ok + alreadyScheduled: the parcel IS covered, just not by a new request.
+  const result = await getCourierAdapter(provider).schedulePickup([ref]);
+  if (!result.ok) {
     return { ok: false, error: result.message };
   }
 
@@ -206,10 +238,24 @@ export async function schedulePickupForOrderAction(
     .update(orders)
     .set({ pickupScheduledAt: new Date(), updatedAt: new Date() })
     .where(eq(orders.id, orderId));
+  await db.insert(events).values({
+    siteId: order.siteId,
+    orderId: order.id,
+    customerId: order.customerId,
+    type: "PICKUP_SCHEDULED",
+    payload: {
+      provider,
+      scheduledFor: result.scheduledFor,
+      pickupId: result.pickupId,
+      alreadyScheduled: result.alreadyScheduled,
+      by: "pack-console",
+    },
+    source: "operator",
+  });
   revalidateOrderEverywhere(orderId);
   return {
     ok: true,
-    scheduledFor: result.pickupScheduledDate ?? "auto-scheduled",
+    scheduledFor: result.scheduledFor ?? "auto-scheduled",
   };
 }
 
@@ -347,10 +393,11 @@ export async function schedulePickupAction(): Promise<
   const denied = await gate();
   if (denied) return denied;
 
+  // Shiprocket bookings only; a Delhivery pickup is requested per order card.
   const rows = await db
     .select({ shipmentId: orders.shiprocketShipmentId })
     .from(orders)
-    .where(and(eq(orders.status, "PACKED")));
+    .where(and(eq(orders.status, "PACKED"), eq(orders.courierProvider, "shiprocket")));
 
   const shipmentIds = rows
     .map((r) => r.shipmentId)
@@ -456,15 +503,31 @@ export async function cancelOrderFromPackAction(
     return { ok: false, error: `Order is already ${order.status}.` };
   }
 
-  // Best-effort cancel on Shiprocket so we don't pay for an AWB we won't use.
-  // Errors are logged but do not block the local DB cancel - admin can clean
-  // up Shiprocket separately if needed.
-  if (order.shiprocketOrderId) {
+  // Best-effort cancel on the courier platform so we don't pay for an AWB we
+  // won't use. Errors are logged but do not block the local DB cancel - admin
+  // can clean up on the platform separately if needed. Staff asked for this
+  // cancel; nothing cancels a booking automatically.
+  const provider = asCourierProvider(order.courierProvider);
+  const ref = shipmentRefOf(order);
+  if (provider === "delhivery" ? ref.awb : order.shiprocketOrderId) {
     try {
-      const { cancelShiprocketOrder } = await import("@/lib/shiprocket");
-      await cancelShiprocketOrder(order.shiprocketOrderId);
+      const r = await getCourierAdapter(provider).cancel({
+        ...ref,
+        providerOrderId: order.shiprocketOrderId,
+      });
+      if (!r.ok) logError("pack:cancel-courier", new Error(r.message), { orderId, provider });
+      // Delhivery keeps a shipment cancelled before pickup at "Manifested" —
+      // its tracking never says "cancelled" — so close our tracking row here
+      // or the worker would keep polling it and flag a pickup delay.
+      if (r.ok && provider === "delhivery") {
+        const now = new Date();
+        await db
+          .update(shipmentTracking)
+          .set({ status: "CANCELLED", statusLabel: "Cancelled by us", statusChangedAt: now, terminalAt: now, active: false, updatedAt: now })
+          .where(and(eq(shipmentTracking.orderId, orderId), eq(shipmentTracking.kind, "FORWARD")));
+      }
     } catch (err) {
-      logError("pack:cancel-shiprocket", err, { orderId });
+      logError("pack:cancel-courier", err, { orderId, provider });
     }
   }
 

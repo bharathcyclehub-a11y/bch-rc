@@ -245,6 +245,42 @@ export async function getShiprocketServiceability(
   }
 }
 
+/** One courier option from GET /courier/serviceability/ (fields we read). */
+export type ShiprocketCourierOption = {
+  courier_company_id: number;
+  courier_name?: string;
+  rate?: number;
+  freight_charge?: number;
+  cod_charges?: number;
+  coverage_charges?: number;
+  other_charges?: number;
+  charge_weight?: number;
+  is_surface?: boolean | number;
+  zone?: string;
+  cod?: number;
+  blocked?: number;
+};
+
+/**
+ * Every courier option (with Shiprocket's price) for one parcel on one lane.
+ * Read-only — used for routing quotes. Throws on API failure so the caller
+ * can record "no quote" rather than a made-up price.
+ */
+export async function getShiprocketCourierOptions(q: {
+  originPincode: string;
+  deliveryPincode: string;
+  weightKg: number;
+  cod: boolean;
+  declaredValueInr: number;
+}): Promise<ShiprocketCourierOption[]> {
+  const data = await srFetch<{ data?: { available_courier_companies?: ShiprocketCourierOption[] } }>(
+    `/courier/serviceability/?pickup_postcode=${q.originPincode}&delivery_postcode=${q.deliveryPincode}` +
+      `&weight=${q.weightKg}&cod=${q.cod ? 1 : 0}&declared_value=${Math.round(q.declaredValueInr)}`,
+    { method: "GET", signal: AbortSignal.timeout(8000) },
+  );
+  return data.data?.available_courier_companies ?? [];
+}
+
 // ============================================================
 // Types
 // ============================================================

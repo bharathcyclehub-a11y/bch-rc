@@ -18,13 +18,14 @@
  * that somehow has no job.
  */
 
-import { and, eq, isNull, lte, sql, inArray, or } from "drizzle-orm";
+import { and, eq, isNull, lte, ne, sql, inArray, or } from "drizzle-orm";
 import { db } from "@/db";
 import { orders, shipmentJobs } from "@/db/schema";
 import {
   createShipmentForOrder,
   NotShippableError,
   OrderNotFoundError,
+  ShipmentHeldError,
   type ShipmentResult,
 } from "@/lib/fulfillment/create-shipment";
 import { alertOps } from "@/lib/alert";
@@ -58,7 +59,8 @@ export async function enqueueShipmentJob(orderId: string): Promise<void> {
 
 type FinalizeOutcome =
   | { ok: true; result: ShipmentResult }
-  | { ok: false; error: string; permanent: boolean };
+  | { ok: false; error: string; permanent: boolean }
+  | { held: true; reason: string; retryAfterMinutes: number };
 
 async function finalize(
   orderId: string,
@@ -66,6 +68,25 @@ async function finalize(
   maxAttempts: number,
   outcome: FinalizeOutcome,
 ): Promise<void> {
+  if ("held" in outcome) {
+    // Deliberately not booked yet (staff decision pending, or a lost Delhivery
+    // response still being reconciled). Stay PENDING and look again later;
+    // the attempt is given back so waiting can never exhaust the job or fire
+    // the "FAILED permanently" alert. create-shipment alerts ops once.
+    await db
+      .update(shipmentJobs)
+      .set({
+        status: "PENDING",
+        attempts: Math.max(0, attempts - 1),
+        lastError: `held: ${outcome.reason}`.slice(0, 500),
+        lockedAt: null,
+        nextAttemptAt: new Date(Date.now() + outcome.retryAfterMinutes * 60_000),
+        updatedAt: new Date(),
+      })
+      .where(eq(shipmentJobs.orderId, orderId));
+    return;
+  }
+
   if (outcome.ok) {
     await db
       .update(shipmentJobs)
@@ -122,14 +143,22 @@ async function runClaimed(
   orderId: string,
   attempts: number,
   maxAttempts: number,
-): Promise<{ ran: boolean; result?: ShipmentResult; error?: string }> {
+): Promise<{ ran: boolean; result?: ShipmentResult; error?: string; held?: boolean }> {
   try {
     const result = await createShipmentForOrder(orderId);
     await finalize(orderId, attempts, maxAttempts, { ok: true, result });
     return { ran: true, result };
   } catch (err) {
+    if (err instanceof ShipmentHeldError) {
+      await finalize(orderId, attempts, maxAttempts, {
+        held: true,
+        reason: err.reason,
+        retryAfterMinutes: err.retryAfterMinutes,
+      });
+      return { ran: true, error: err.message, held: true };
+    }
     // NotShippable / OrderNotFound are permanent for this job — retrying won't
-    // help (e.g. order CANCELLED). Everything else (Shiprocket 5xx, network)
+    // help (e.g. order CANCELLED). Everything else (courier 5xx, network)
     // is transient and should back off + retry.
     const permanent =
       err instanceof NotShippableError || err instanceof OrderNotFoundError;
@@ -187,7 +216,7 @@ export async function runShipmentJobOnce(
  */
 export async function drainShipmentJobs(
   batchSize = 50,
-): Promise<{ enqueued: number; reaped: number; processed: number; done: number; failed: number }> {
+): Promise<{ enqueued: number; reaped: number; processed: number; done: number; failed: number; held: number }> {
   // 1. Reap stuck PROCESSING leases back to PENDING so they can be retried.
   const reapBefore = new Date(Date.now() - LEASE_MINUTES * 60 * 1000);
   const reaped = await db
@@ -202,11 +231,16 @@ export async function drainShipmentJobs(
     .returning({ orderId: shipmentJobs.orderId });
 
   // A real Shiprocket order id is all-digits. NULL or the legacy "undefined"
-  // (from the old String(undefined) bug) both mean "not actually created".
-  const noRealShipment = or(
-    isNull(orders.shiprocketOrderId),
-    eq(orders.shiprocketOrderId, "undefined"),
-    eq(orders.shiprocketOrderId, ""),
+  // (from the old String(undefined) bug) both mean "not actually created" —
+  // unless it is a Delhivery booking, which has no Shiprocket id at all and
+  // is real once it has its waybill.
+  const noRealShipment = and(
+    or(
+      isNull(orders.shiprocketOrderId),
+      eq(orders.shiprocketOrderId, "undefined"),
+      eq(orders.shiprocketOrderId, ""),
+    ),
+    or(ne(orders.courierProvider, "delhivery"), isNull(orders.awbCode)),
   );
 
   // 2. Safety net: any PAID/PACKED order with no real shipment + no job → enqueue.
@@ -303,13 +337,15 @@ export async function drainShipmentJobs(
   const rows = (claimed as unknown as { order_id: string; attempts: number; max_attempts: number }[]) ?? [];
   let done = 0;
   let failed = 0;
+  let held = 0;
   for (const r of rows) {
     const out = await runClaimed(r.order_id, r.attempts, r.max_attempts);
     if (out.result) done++;
+    else if (out.held) held++;
     else if (out.error) failed++;
   }
 
-  return { enqueued, reaped: reaped.length, processed: rows.length, done, failed };
+  return { enqueued, reaped: reaped.length, processed: rows.length, done, failed, held };
 }
 
 /**

@@ -27,6 +27,7 @@ import { notifyOrderEvent } from "@/lib/notifications/notify";
 import { sendCustomerNotice } from "@/lib/notifications/customer-notice";
 import { releaseOrderHoldsBestEffort } from "@/lib/inventory/release";
 import { logError } from "@/lib/logger";
+import { asCourierProvider, courierTrackingUrl } from "@/lib/couriers";
 import { scanFingerprint, snapshotEvents, type CarrierSnapshot } from "./carrier";
 import { deriveTrackingStatus } from "./derive";
 import {
@@ -318,7 +319,7 @@ export async function ingestSnapshot(
         }
         if (awb && !order.awbCode) {
           set.awbCode = awb;
-          set.trackingUrl = order.trackingUrl ?? `https://shiprocket.co/tracking/${awb}`;
+          set.trackingUrl = order.trackingUrl ?? courierTrackingUrl(asCourierProvider(row.courierProvider), awb);
         }
         if (snap.courierName && !(order.courierName ?? "").trim()) set.courierName = snap.courierName;
 

@@ -46,10 +46,15 @@ async function main() {
   // rather than the unrelated product_overrides table from the original script.
   const tables = [...sqlText.matchAll(/CREATE TABLE IF NOT EXISTS (?:public\.)?([a-z_][a-z0-9_]*)/gi)].map((m) => m[1]);
   const indexes = [...sqlText.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS ([a-z_][a-z0-9_]*)/gi)].map((m) => m[1]);
-  if (tables.length === 0 && indexes.length === 0) {
-    throw new Error("No supported CREATE TABLE/INDEX targets found to verify.");
-  }
   const stmts = statements(sqlText);
+  // ALTER TABLE t ADD COLUMN IF NOT EXISTS c … — each added column is verified too.
+  const columns = stmts.flatMap((s) => {
+    const t = s.match(/^ALTER TABLE (?:public\.)?([a-z_][a-z0-9_]*)/i)?.[1];
+    return t ? [...s.matchAll(/ADD COLUMN IF NOT EXISTS ([a-z_][a-z0-9_]*)/gi)].map((m) => ({ table: t, column: m[1] })) : [];
+  });
+  if (tables.length === 0 && indexes.length === 0 && columns.length === 0) {
+    throw new Error("No supported CREATE TABLE/INDEX or ADD COLUMN targets found to verify.");
+  }
   console.log(`\nApplying ${stmts.length} statement(s) from ${file}\n`);
 
   for (const s of stmts) {
@@ -78,6 +83,14 @@ async function main() {
     `);
     if (!row) throw new Error(`VERIFY FAILED: ${index} is absent`);
     console.log(`  verified index ${index}`);
+  }
+  for (const { table, column } of columns) {
+    const [row] = await db.execute(sql`
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ${table} AND column_name = ${column}
+    `);
+    if (!row) throw new Error(`VERIFY FAILED: ${table}.${column} is absent`);
+    console.log(`  verified column ${table}.${column}`);
   }
   console.log("\nVERIFIED: all migration targets exist.\n");
   process.exit(0);

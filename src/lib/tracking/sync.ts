@@ -31,11 +31,11 @@ import {
   webhooksInbound,
   type ShipmentTrackingRow,
 } from "@/db/schema";
-import { fetchShiprocketTracking, ShiprocketApiError } from "@/lib/shiprocket";
 import { getSetting, setSetting } from "@/lib/settings";
 import { alertOps } from "@/lib/alert";
 import { logError, logWarn } from "@/lib/logger";
-import { parseShiprocketTracking } from "./carrier";
+import { asCourierProvider, COURIER_PROVIDERS, getCourierAdapter, type CourierProvider } from "@/lib/couriers";
+import { circuitState, isCourierRefusal, openCircuit, redactCourierError } from "@/lib/couriers/health";
 import { DEFAULT_TRACKING_CONFIG, resolveTrackingConfig, type TrackingConfig } from "./config";
 import { failureBackoffMinutes, nextSyncDelayMinutes, withJitter } from "./assess";
 import { applyIngestEffects, ingestSnapshot, loadTrackingRow } from "./ingest";
@@ -46,10 +46,9 @@ import {
   raiseException,
   reconcileExceptions,
 } from "./exceptions";
-import { processStoredWebhook } from "./webhook";
+import { processStoredDelhiveryWebhook, processStoredWebhook } from "./webhook";
 
 const LEASE_MINUTES = 5;
-const CIRCUIT_KEY = "tracking.circuit";
 
 /** A Date for a RAW sql template. Drizzle hands raw-template params to
  *  postgres-js untouched, and postgres-js rejects a bare Date there. */
@@ -59,31 +58,9 @@ export async function loadTrackingConfig(): Promise<TrackingConfig> {
   return resolveTrackingConfig(await getSetting("tracking.config"));
 }
 
-type Circuit = { openUntil: string; reason: string; openedAt: string };
-
-export async function circuitState(now: Date): Promise<Circuit | null> {
-  const c = await getSetting<Circuit>(CIRCUIT_KEY);
-  return c && new Date(c.openUntil) > now ? c : null;
-}
-
-async function openCircuit(now: Date, minutes: number, reason: string): Promise<void> {
-  const until = new Date(now.getTime() + minutes * 60_000);
-  await setSetting(CIRCUIT_KEY, { openUntil: until.toISOString(), reason, openedAt: now.toISOString() }, "system");
-  await alertOps({
-    scope: "tracking",
-    message: `Courier tracking paused for ${minutes} min: ${reason}`,
-    context: { until: until.toISOString() },
-  });
-}
-
-/** Courier refused us outright (auth / IP block / rate limit). */
-function isRefusal(err: unknown): err is ShiprocketApiError {
-  return err instanceof ShiprocketApiError && (err.isAuth || err.status === 401 || err.status === 403 || err.status === 429);
-}
-
-function redact(msg: string): string {
-  return msg.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***").slice(0, 300);
-}
+// The circuit breaker is per provider (src/lib/couriers/health.ts): a refusing
+// Delhivery never pauses Shiprocket tracking. Re-exported for admin pages.
+export { circuitState };
 
 /**
  * Create tracking rows for in-flight orders that don't have one yet, and keep
@@ -93,8 +70,8 @@ function redact(msg: string): string {
 export async function bootstrapTrackingRows(now: Date): Promise<number> {
   const inserted = await db.execute<{ id: string }>(sql`
     INSERT INTO shipment_tracking
-      (site_id, order_id, kind, shiprocket_shipment_id, awb_code, courier_name, status, next_sync_at, created_at, updated_at)
-    SELECT o.site_id, o.id, 'FORWARD',
+      (site_id, order_id, kind, courier_provider, shiprocket_shipment_id, awb_code, courier_name, status, next_sync_at, created_at, updated_at)
+    SELECT o.site_id, o.id, 'FORWARD', o.courier_provider,
            NULLIF(NULLIF(o.shiprocket_shipment_id, ''), 'undefined'),
            NULLIF(o.awb_code, ''),
            NULLIF(o.courier_name, ''),
@@ -110,14 +87,16 @@ export async function bootstrapTrackingRows(now: Date): Promise<number> {
   `);
   try {
     const moved = (await db.execute(sql`
-      SELECT t.id, o.awb_code AS awb
+      SELECT t.id, o.awb_code AS awb, o.courier_provider AS provider
         FROM shipment_tracking t JOIN orders o ON o.id = t.order_id
        WHERE t.kind = 'FORWARD'
          AND COALESCE(o.awb_code, '') <> ''
          AND t.awb_code IS DISTINCT FROM o.awb_code
          AND NOT EXISTS (SELECT 1 FROM shipment_tracking x WHERE x.awb_code = o.awb_code)
-    `)) as unknown as Array<{ id: string; awb: string }>;
-    for (const m of moved) await repointTracking(m.id, m.awb, "order AWB changed", now);
+    `)) as unknown as Array<{ id: string; awb: string; provider: string }>;
+    for (const m of moved) {
+      await repointTracking(m.id, m.awb, "order AWB changed", now, asCourierProvider(m.provider));
+    }
   } catch (err) {
     logError("tracking:bootstrap-awb", err);
   }
@@ -128,13 +107,23 @@ export async function bootstrapTrackingRows(now: Date): Promise<number> {
  * Point a tracking row at a NEW AWB (the order was re-shipped: a Shiprocket
  * "-C" clone, or an operator changed the AWB). Courier facts from the old AWB
  * are cleared from the row — its events stay in history but no longer drive
- * the status — and the row is polled straight away.
+ * the status — and the row is polled straight away. `provider` is the platform
+ * the NEW AWB was booked on (a Shiprocket order moved to Delhivery before its
+ * AWB, or a Delhivery parcel re-shipped through Shiprocket).
  */
-export async function repointTracking(trackingId: string, newAwb: string, reason: string, now: Date = new Date()): Promise<void> {
+export async function repointTracking(
+  trackingId: string,
+  newAwb: string,
+  reason: string,
+  now: Date = new Date(),
+  provider?: CourierProvider,
+): Promise<void> {
   const [row] = await db
     .update(shipmentTracking)
     .set({
       awbCode: newAwb,
+      ...(provider ? { courierProvider: provider } : {}),
+      ...(provider === "delhivery" ? { shiprocketShipmentId: null } : {}),
       courierName: null,
       status: "UNKNOWN",
       statusLabel: null,
@@ -162,7 +151,7 @@ export async function repointTracking(trackingId: string, newAwb: string, reason
     siteId: row.siteId,
     orderId: row.orderId,
     type: "TRACKING_AWB_CHANGED",
-    payload: { trackingId, to: newAwb, reason },
+    payload: { trackingId, to: newAwb, reason, provider: provider ?? null },
     source: "system",
   });
 }
@@ -178,13 +167,15 @@ async function syncClaimed(
   now: Date,
   notify: boolean,
 ): Promise<SyncOneResult> {
-  if (!row.awbCode && !row.shiprocketShipmentId) {
+  const provider = asCourierProvider(row.courierProvider);
+  // Delhivery tracks by waybill only; Shiprocket also by its shipment id.
+  if (!row.awbCode && (provider === "delhivery" || !row.shiprocketShipmentId)) {
     await db
       .update(shipmentTracking)
       .set({
         syncLockedUntil: null,
         nextSyncAt: new Date(now.getTime() + cfg.awaitingIntervalMin * 60_000),
-        lastSyncError: "No AWB or Shiprocket shipment id to track",
+        lastSyncError: provider === "delhivery" ? "No Delhivery waybill to track" : "No AWB or Shiprocket shipment id to track",
         updatedAt: now,
       })
       .where(eq(shipmentTracking.id, row.id));
@@ -192,9 +183,13 @@ async function syncClaimed(
   }
 
   try {
-    const body = await fetchShiprocketTracking({ awb: row.awbCode, shipmentId: row.shiprocketShipmentId });
-    const snap = parseShiprocketTracking(body);
-    if (!snap) throw new Error(`Unrecognised tracking response: ${JSON.stringify(body).slice(0, 160)}`);
+    // The adapter fetches and parses into the shared CarrierSnapshot; it
+    // throws on anything that isn't a tracking answer (never "no news").
+    const snap = await getCourierAdapter(provider).track({
+      awb: row.awbCode,
+      shipmentId: row.shiprocketShipmentId,
+      providerOrderId: null,
+    });
 
     const outcome = await ingestSnapshot(row.id, snap, "POLL", now);
     await applyIngestEffects(outcome, { notify, now });
@@ -232,9 +227,9 @@ async function syncClaimed(
       status: outcome.status,
     };
   } catch (err) {
-    const refused = isRefusal(err);
+    const refused = isCourierRefusal(err);
     const failures = row.consecutiveFailures + 1;
-    const message = redact(err instanceof Error ? err.message : String(err));
+    const message = redactCourierError(err instanceof Error ? err.message : String(err));
     await db
       .update(shipmentTracking)
       .set({
@@ -316,7 +311,7 @@ async function retryFailedWebhooks(now: Date, notify: boolean): Promise<number> 
     .from(webhooksInbound)
     .where(
       and(
-        eq(webhooksInbound.source, "shiprocket"),
+        inArray(webhooksInbound.source, ["shiprocket", "delhivery"]),
         eq(webhooksInbound.processed, false),
         lt(webhooksInbound.attempts, 5),
         lt(webhooksInbound.createdAt, new Date(now.getTime() - 2 * 60_000)),
@@ -327,7 +322,8 @@ async function retryFailedWebhooks(now: Date, notify: boolean): Promise<number> 
     )
     .limit(20);
   for (const w of due) {
-    await processStoredWebhook(w.id, w.externalId, w.payload, now, notify).catch((err) =>
+    const process = w.source === "delhivery" ? processStoredDelhiveryWebhook : processStoredWebhook;
+    await process(w.id, w.externalId, w.payload, now, notify).catch((err) =>
       logError("tracking:webhook-retry", err, { webhookId: w.id }),
     );
   }
@@ -378,16 +374,26 @@ export async function runTrackingSync(opts: {
     summary.bootstrapped = await bootstrapTrackingRows(now);
     summary.webhooksRetried = await retryFailedWebhooks(now, notify);
 
-    const circuit = await circuitState(now);
-    if (circuit) {
-      summary.skippedReason = `circuit open until ${circuit.openUntil}: ${circuit.reason}`;
-    } else {
+    // One breaker per provider: rows of a paused provider are neither claimed
+    // nor called; the other provider's rows sync as normal.
+    const paused = new Set<CourierProvider>();
+    const skipped: string[] = [];
+    for (const p of COURIER_PROVIDERS) {
+      const circuit = await circuitState(now, p);
+      if (circuit) {
+        paused.add(p);
+        skipped.push(`${p} circuit open until ${circuit.openUntil}: ${circuit.reason}`);
+      }
+    }
+    if (paused.size < COURIER_PROVIDERS.length) {
       const limit = opts.limit ?? cfg.maxPerRun;
+      const excluded = [...paused];
       const claimed = (await db.execute(sql`
         WITH due AS (
           SELECT id FROM shipment_tracking
            WHERE active AND next_sync_at <= ${ts(now)}
              AND (sync_locked_until IS NULL OR sync_locked_until < ${ts(now)})
+             ${excluded.length ? sql`AND courier_provider NOT IN (${sql.join(excluded.map((p) => sql`${p}`), sql`, `)})` : sql``}
            ORDER BY next_sync_at
            LIMIT ${limit}
            FOR UPDATE SKIP LOCKED
@@ -403,6 +409,12 @@ export async function runTrackingSync(opts: {
       for (const [i, { id }] of claimed.entries()) {
         const row = await loadTrackingRow(id);
         if (!row) continue;
+        const provider = asCourierProvider(row.courierProvider);
+        if (paused.has(provider)) {
+          // Its provider refused us earlier in this run: release the lease, it stays due.
+          await db.update(shipmentTracking).set({ syncLockedUntil: null }).where(eq(shipmentTracking.id, row.id));
+          continue;
+        }
         const r = await syncClaimed(row, cfg, now, notify);
         if (r.ok) {
           summary.succeeded++;
@@ -411,17 +423,9 @@ export async function runTrackingSync(opts: {
           summary.failed++;
           errors.push({ orderId: row.orderId, error: r.error });
           if (r.refused) {
-            await openCircuit(now, cfg.circuitBreakMin, r.error.slice(0, 120));
-            // Release the leases we still hold; they stay due.
-            const rest = claimed.slice(i + 1).map((c) => c.id);
-            if (rest.length) {
-              await db
-                .update(shipmentTracking)
-                .set({ syncLockedUntil: null })
-                .where(inArray(shipmentTracking.id, rest));
-            }
-            summary.skippedReason = `courier refused: ${r.error.slice(0, 120)}`;
-            break;
+            await openCircuit(now, cfg.circuitBreakMin, r.error.slice(0, 120), provider);
+            paused.add(provider);
+            skipped.push(`${provider} refused: ${r.error.slice(0, 120)}`);
           }
         }
         if (cfg.callSpacingMs > 0 && i < claimed.length - 1) {
@@ -429,6 +433,7 @@ export async function runTrackingSync(opts: {
         }
       }
     }
+    summary.skippedReason = skipped.length ? skipped.join("; ").slice(0, 500) : null;
 
     summary.exceptionsOpened = await evaluateAll(cfg, now, notify);
     await alertOnStaleSync(cfg, now);
@@ -461,7 +466,12 @@ export async function syncTrackingNow(
   now: Date = new Date(),
 ): Promise<SyncOneResult | { ok: false; error: string; refused: boolean }> {
   const cfg = await loadTrackingConfig();
-  const circuit = await circuitState(now);
+  const [target] = await db
+    .select({ provider: shipmentTracking.courierProvider })
+    .from(shipmentTracking)
+    .where(eq(shipmentTracking.id, trackingId));
+  const provider = asCourierProvider(target?.provider);
+  const circuit = await circuitState(now, provider);
   if (circuit) return { ok: false, error: `Courier tracking is paused until ${circuit.openUntil}: ${circuit.reason}`, refused: true };
   const claimed = await db
     .update(shipmentTracking)
@@ -475,7 +485,7 @@ export async function syncTrackingNow(
     .returning();
   if (claimed.length === 0) return { ok: false, error: "A sync for this shipment is already running.", refused: false };
   const r = await syncClaimed(claimed[0], cfg, now, true);
-  if (!r.ok && r.refused) await openCircuit(now, cfg.circuitBreakMin, r.error.slice(0, 120));
+  if (!r.ok && r.refused) await openCircuit(now, cfg.circuitBreakMin, r.error.slice(0, 120), provider);
   return r;
 }
 
@@ -493,6 +503,7 @@ export async function ensureForwardTracking(orderId: string, now: Date = new Dat
       awbCode: orders.awbCode,
       shipmentId: orders.shiprocketShipmentId,
       courierName: orders.courierName,
+      courierProvider: orders.courierProvider,
     })
     .from(orders)
     .where(eq(orders.id, orderId));
@@ -504,6 +515,7 @@ export async function ensureForwardTracking(orderId: string, now: Date = new Dat
       siteId: o.siteId,
       orderId: o.id,
       kind: "FORWARD",
+      courierProvider: asCourierProvider(o.courierProvider),
       shiprocketShipmentId: shipmentId,
       awbCode: o.awbCode || null,
       courierName: (o.courierName ?? "").trim() || null,

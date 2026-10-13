@@ -27,6 +27,8 @@ type Props = {
   status: string;
   awbCode: string | null;
   courierName: string | null;
+  /** "shiprocket" | "delhivery" — the platform the order is booked on. */
+  courierProvider?: string;
   invoiceNumber: string | null;
   placedAt: Date | string | null;
   shippingAddress: {
@@ -77,6 +79,7 @@ export function PackOrderRow({
   status,
   awbCode,
   courierName,
+  courierProvider = "shiprocket",
   invoiceNumber,
   placedAt,
   shippingAddress,
@@ -115,7 +118,8 @@ export function PackOrderRow({
       const result = await printManifestForOrderAction(orderId);
       setBusyKind(null);
       if (result.ok) {
-        window.open(result.manifestUrl, "_blank", "noopener");
+        // Delhivery has no manifest sheet (url null) — nothing to open.
+        if (result.manifestUrl) window.open(result.manifestUrl, "_blank", "noopener");
         // Action revalidates → row moves to Pickups & Manifests.
       } else {
         setError(result.error);
@@ -172,7 +176,7 @@ export function PackOrderRow({
     // Browser confirm avoids accidental cancels — packing employee may
     // tap this by mistake in a busy queue.
     const reason = window.prompt(
-      `Cancel order ${orderId}?\n\nType a short reason (e.g. "test order", "wrong address"). Cancelling here also cancels the Shiprocket shipment.`,
+      `Cancel order ${orderId}?\n\nType a short reason (e.g. "test order", "wrong address"). Cancelling here also cancels the ${courierProvider === "delhivery" ? "Delhivery" : "Shiprocket"} shipment.`,
       "test order",
     );
     if (!reason || reason.trim().length < 2) return;
@@ -362,7 +366,8 @@ export function PackOrderRow({
                   ) : (
                     <ClipboardList size={13} />
                   )}
-                  Manifest
+                  {/* Delhivery manifests at booking — this only moves the row on. */}
+                  {courierProvider === "delhivery" ? "Ready for pickup" : "Manifest"}
                 </button>
               )}
               {/* Schedule pickup — appears after manifesting, hidden once done. */}
