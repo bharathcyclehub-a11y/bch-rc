@@ -1,8 +1,8 @@
 /**
  * Inventory read helpers — the DB `inventory` table is the SINGLE SOURCE OF
- * TRUTH for stock. The storefront (PDP, grid) reads live stock from here via
- * /api/stock; src/lib/products.ts `colors[].stock` is now SEED-ONLY (consumed
- * by db/seed-inventory.ts) and must never drive UI or order decisions.
+ * TRUTH for stock. The storefront (PDP, grid, cart, checkout) reads live stock
+ * from here via /api/stock; src/lib/products.ts `colors[].stock` is SEED-ONLY
+ * (consumed by db/seed-inventory.ts) and must never drive UI or order decisions.
  *
  * This module is read-only on purpose. Stock DECREMENT lives in the order-create
  * transaction and stock RESTORE lives in the order lifecycle (holdsReleased /
@@ -14,15 +14,15 @@ import { db } from "@/db";
 import { inventory } from "@/db/schema";
 import { PRODUCTS } from "@/lib/products";
 import { LOW_STOCK_THRESHOLD } from "@/lib/stock-threshold";
+import { BUNDLE_COMPONENTS, getBundleComponentSkuIds } from "@/lib/availability";
+import { getOverrideMap, applyOverrides } from "@/lib/product-overrides";
 
 export const INVENTORY_SITE_ID = "prc";
 
 /**
  * ONE single inventory (2026-07-08). The old per-store split (1:16 under
  * "prc16", everything else under "prc") is gone — the hub is the single
- * storefront and every inventory row lives under "prc". The prc16 rows were
- * re-keyed to prc in the same change; seed + decrement + restore all target
- * this one keyspace.
+ * storefront and every inventory row lives under "prc".
  */
 export const ALL_SITE_IDS = [INVENTORY_SITE_ID] as const;
 
@@ -57,8 +57,6 @@ export function expectedInventoryKeys(siteId?: string): ExpectedKey[] {
   const out: ExpectedKey[] = [];
   for (const sku of PRODUCTS) {
     if (sku.hidden) continue;
-    // Single inventory: every SKU lives under INVENTORY_SITE_ID, so a site
-    // scope other than the hub site expects nothing.
     if (siteId && siteId !== INVENTORY_SITE_ID) continue;
     if (sku.colors && sku.colors.length > 0) {
       for (const c of sku.colors) {
@@ -84,11 +82,29 @@ export function expectedInventoryKeys(siteId?: string): ExpectedKey[] {
 }
 
 /**
+ * Expand a list of SKU IDs to also include any component SKUs required by
+ * fixed-price bundles (e.g. `construction-3pack` -> `mining-truck`, `rc-excavator`, `rc-forklift`).
+ */
+export function expandSkuIdsWithBundleComponents(skuIds?: string[]): string[] | undefined {
+  if (!skuIds || skuIds.length === 0) return undefined;
+  const set = new Set<string>(skuIds);
+  for (const id of skuIds) {
+    const comps = BUNDLE_COMPONENTS[id];
+    if (comps) {
+      for (const c of comps) set.add(c);
+    }
+  }
+  return Array.from(set);
+}
+
+/**
  * Live stock per `${skuId}:${variantSlug}` from the DB — the single source of
- * truth. Optionally filter to specific SKUs. A key that is absent from the
- * returned map means "no inventory row configured" (callers treat as 0/unknown).
+ * truth. Optionally filter to specific SKUs (automatically expanding bundle
+ * component SKUs). A key that is absent from the returned map means "no
+ * inventory row configured" (callers treat as 0/unavailable).
  */
 export async function getStockMap(skuIds?: string[]): Promise<Record<string, number>> {
+  const expanded = expandSkuIdsWithBundleComponents(skuIds);
   const rows = await db
     .select({
       skuId: inventory.skuId,
@@ -97,10 +113,10 @@ export async function getStockMap(skuIds?: string[]): Promise<Record<string, num
     })
     .from(inventory)
     .where(
-      skuIds && skuIds.length > 0
+      expanded && expanded.length > 0
         ? and(
             eq(inventory.siteId, INVENTORY_SITE_ID),
-            inArray(inventory.skuId, skuIds),
+            inArray(inventory.skuId, expanded),
           )
         : eq(inventory.siteId, INVENTORY_SITE_ID),
     );
@@ -113,6 +129,17 @@ export async function getStockMap(skuIds?: string[]): Promise<Record<string, num
 export type InventoryHealthItem = ExpectedKey & {
   stock: number | null;
   configured: boolean;
+  lowStockThreshold: number;
+};
+
+export type MisconfiguredActiveSku = {
+  skuId: string;
+  skuName: string;
+  name: string;
+  variantSlug: string;
+  stock: number | null;
+  reason: "MISSING_INVENTORY_ROW" | "ACTIVE_ZERO_STOCK" | "BUNDLE_COMPONENT_OOS";
+  detail: string;
 };
 
 export type InventoryHealth = {
@@ -126,6 +153,8 @@ export type InventoryHealth = {
   missing: InventoryHealthItem[];
   soldOut: InventoryHealthItem[];
   lowStock: InventoryHealthItem[];
+  /** Active storefront SKUs that are missing DB rows, at 0 stock across all variants, or bundles with OOS components. */
+  misconfiguredActive: MisconfiguredActiveSku[];
   /** Inventory rows for SKUs/variants no longer in the catalog. */
   orphanKeys: string[];
 };
@@ -133,34 +162,102 @@ export type InventoryHealth = {
 /**
  * Compare the orderable catalog against the inventory table. Surfaces missing
  * rows (the bootstrap-safety hazard — checkout rejects these), sold-out and
- * low-stock variants, and orphan rows. Powers the admin health page and the
- * /api/health/inventory monitor endpoint.
+ * low-stock variants, active SKUs with 0 stock or broken bundle components,
+ * and orphan rows. Powers the admin health page and /api/health/inventory.
  */
 export async function getInventoryHealth(
-  siteId: string = INVENTORY_SITE_ID,
+  siteIdOrIds: string | string[] = INVENTORY_SITE_ID,
 ): Promise<InventoryHealth> {
+  const siteId = Array.isArray(siteIdOrIds)
+    ? siteIdOrIds[0] ?? INVENTORY_SITE_ID
+    : siteIdOrIds;
   const expected = expectedInventoryKeys(siteId);
-  const rows = await db
-    .select({
-      skuId: inventory.skuId,
-      variantSlug: inventory.variantSlug,
-      stock: inventory.stock,
-    })
-    .from(inventory)
-    .where(eq(inventory.siteId, siteId));
+  const [rows, overrideMap] = await Promise.all([
+    db
+      .select({
+        skuId: inventory.skuId,
+        variantSlug: inventory.variantSlug,
+        stock: inventory.stock,
+      })
+      .from(inventory)
+      .where(eq(inventory.siteId, siteId)),
+    getOverrideMap([siteId]),
+  ]);
 
   const rowMap = new Map(rows.map((r) => [`${r.skuId}:${r.variantSlug}`, r.stock]));
+  const mergedSkus = applyOverrides(PRODUCTS, overrideMap);
+  const skuById = new Map(mergedSkus.map((s) => [s.id, s]));
 
   const items: InventoryHealthItem[] = expected.map((e) => {
     const stock = rowMap.has(e.key) ? (rowMap.get(e.key) as number) : null;
-    return { ...e, stock, configured: stock !== null };
+    const sku = skuById.get(e.skuId);
+    const threshold = Math.max(1, sku?.lowStockThreshold ?? LOW_STOCK_THRESHOLD);
+    return {
+      ...e,
+      stock,
+      configured: stock !== null,
+      lowStockThreshold: threshold,
+    };
   });
 
   const missing = items.filter((i) => !i.configured);
   const soldOut = items.filter((i) => i.configured && (i.stock ?? 0) <= 0);
   const lowStock = items.filter(
-    (i) => i.configured && (i.stock ?? 0) > 0 && (i.stock ?? 0) <= LOW_STOCK_THRESHOLD,
+    (i) => i.configured && (i.stock ?? 0) > 0 && (i.stock ?? 0) <= i.lowStockThreshold,
   );
+
+  // Detect active storefront SKUs that are misconfigured or unavailable
+  const misconfiguredActive: MisconfiguredActiveSku[] = [];
+  for (const sku of mergedSkus) {
+    if (sku.hidden || sku.internal || sku.comingSoon || sku.discontinued) continue;
+    const skuItems = items.filter((i) => i.skuId === sku.id);
+    const firstMissing = skuItems.find((i) => !i.configured);
+    if (firstMissing) {
+      misconfiguredActive.push({
+        skuId: sku.id,
+        skuName: sku.name,
+        name: sku.name,
+        variantSlug: firstMissing.variantSlug,
+        stock: null,
+        reason: "MISSING_INVENTORY_ROW",
+        detail: "Missing DB inventory row(s) — blocked from purchase until seeded.",
+      });
+      continue;
+    }
+    const totalSkuStock = skuItems.reduce((sum, i) => sum + Math.max(0, i.stock ?? 0), 0);
+    if (totalSkuStock <= 0 && !sku.preorder) {
+      misconfiguredActive.push({
+        skuId: sku.id,
+        skuName: sku.name,
+        name: sku.name,
+        variantSlug: skuItems[0]?.variantSlug ?? "",
+        stock: 0,
+        reason: "ACTIVE_ZERO_STOCK",
+        detail: "Active catalog SKU has 0 total units across all variants (showing SOLD OUT).",
+      });
+      continue;
+    }
+    const compIds = getBundleComponentSkuIds(sku);
+    if (compIds.length > 0 && totalSkuStock > 0) {
+      for (const compId of compIds) {
+        const compStock = items
+          .filter((i) => i.skuId === compId)
+          .reduce((sum, i) => sum + Math.max(0, i.stock ?? 0), 0);
+        if (compStock <= 0) {
+          misconfiguredActive.push({
+            skuId: sku.id,
+            skuName: sku.name,
+            name: sku.name,
+            variantSlug: "",
+            stock: totalSkuStock,
+            reason: "BUNDLE_COMPONENT_OOS",
+            detail: `Bundle has ${totalSkuStock} units configured, but component '${compId}' has 0 stock.`,
+          });
+          break;
+        }
+      }
+    }
+  }
 
   const expectedKeySet = new Set(expected.map((e) => e.key));
   const orphanKeys = rows
@@ -178,6 +275,7 @@ export async function getInventoryHealth(
     missing,
     soldOut,
     lowStock,
+    misconfiguredActive,
     orphanKeys,
   };
 }

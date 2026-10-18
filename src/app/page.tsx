@@ -22,17 +22,57 @@ import Footer from "@/components/Footer";
 // (mini 1:64, big 1:16, 1:20, construction, polo). Indexable: this is the main
 // store page, not the old noindex preview.
 export const metadata: Metadata = {
-  title: "PRC Cars — Pocket RC Drift Cars, COD across India",
+  title: {
+    absolute:
+      "Pocket RC Cars India — Mini 1:64, 1:16 Drift, Construction & Hobby Grade RC Cars",
+  },
   description:
-    "Shop RC drift cars from ₹999 — mini 1:64, big 1:16, construction & more. Cash on Delivery pan-India, 7-day replacement, ships in 24 hrs from Bangalore.",
-  alternates: { canonical: "/" },
+    "Shop Pocket RC Cars in India from ₹999 — 1:64 & 1:43 mini RC cars, 1:16 4WD smoke drift cars, RC excavators & 4WD hobby-grade rock crawlers. 24-hr Bangalore dispatch & Pan-India COD.",
+  alternates: { canonical: "https://pocketrccars.com/" },
 };
 
 export const revalidate = 3600;
 
+const homepageJsonLd = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://pocketrccars.com/#organization",
+      name: "Pocket RC Cars",
+      alternateName: "PRC Cars",
+      url: "https://pocketrccars.com/",
+      logo: "https://pocketrccars.com/logo/prc-logo.png",
+      contactPoint: {
+        "@type": "ContactPoint",
+        contactType: "customer service",
+        areaServed: "IN",
+        availableLanguage: ["en", "hi"],
+      },
+      sameAs: [
+        "https://www.instagram.com/pocketrccars",
+        "https://www.youtube.com/@pocketrccars",
+      ],
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://pocketrccars.com/#website",
+      url: "https://pocketrccars.com/",
+      name: "Pocket RC Cars",
+      publisher: { "@id": "https://pocketrccars.com/#organization" },
+    },
+  ],
+};
+
 export default function Page() {
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(homepageJsonLd).replace(/</g, "\\u003c"),
+        }}
+      />
       <main className="bg-white">
         <AnnouncementBar />
         {/* Shared header — transparent over the hero on the homepage. */}

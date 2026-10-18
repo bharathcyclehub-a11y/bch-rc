@@ -5,14 +5,13 @@
  * Design: stock and coupon usage are RESERVED at order-create (the PENDING
  * order row is the reservation record). When an order reaches a terminal,
  * un-fulfilled state — payment FAILED, abandoned/timed-out, CANCELLED, or
- * REFUNDED — those reservations must be returned, once and only once.
+ * pre-shipment REFUNDED — those reservations must be returned, once and only
+ * once.
  *
- * Concurrency: the whole release runs in a single transaction. The first
- * statement atomically flips `orders.holds_released` false → true with a
- * conditional UPDATE; that row-locked flip IS the claim. If it returns zero
- * rows another caller already released (or the order never existed), and we
- * no-op. So firing this from the failed-webhook, the refund-webhook, AND the
- * abandoned-sweeper concurrently is safe — exactly one of them does the work.
+ * Critical guard: if an order is REFUNDED *after* shipment dispatch
+ * (`shippedAt !== null` or status is `SHIPPED`/`DELIVERED`), physical stock has
+ * already left the warehouse and MUST NOT be added back to `inventory.stock`
+ * (only `RTO` return-to-origin restores shipped stock).
  */
 
 import { and, eq, sql } from "drizzle-orm";
@@ -26,6 +25,8 @@ import {
 } from "@/db/schema";
 import { logError } from "@/lib/logger";
 import { INVENTORY_SITE_ID } from "@/lib/inventory";
+import { PRODUCTS } from "@/lib/products";
+import { getBundleComponentSkuIds } from "@/lib/availability";
 
 type OrderItem = {
   skuId: string;
@@ -39,8 +40,7 @@ export type ReleaseReason =
   | "CANCELLED"
   | "REFUNDED"
   // Return-to-origin: the courier could not deliver and the parcel came back.
-  // The reserved stock is physically ours again, so it returns to the pool —
-  // same as a cancellation. Coupon usage is released too (the sale didn't land).
+  // The reserved stock is physically ours again, so it returns to the pool.
   | "RTO";
 
 export type ReleaseResult = {
@@ -48,7 +48,27 @@ export type ReleaseResult = {
   orderId: string;
   restoredLines: number;
   couponRowsReleased: number;
+  skippedStockRestoreBecauseShipped?: boolean;
 };
+
+function expandOrderLinesWithBundleComponents(lines: OrderItem[]): OrderItem[] {
+  const expanded: OrderItem[] = [];
+  for (const line of lines) {
+    expanded.push(line);
+    const sku = PRODUCTS.find((p) => p.id === line.skuId);
+    if (sku) {
+      const compIds = getBundleComponentSkuIds(sku);
+      for (const compId of compIds) {
+        expanded.push({
+          skuId: compId,
+          variantSlug: "",
+          qty: line.qty,
+        });
+      }
+    }
+  }
+  return expanded;
+}
 
 /**
  * Release inventory + coupon holds for an order. Idempotent + concurrency-safe.
@@ -68,40 +88,46 @@ export async function releaseOrderHolds(
         items: orders.items,
         siteId: orders.siteId,
         customerId: orders.customerId,
+        status: orders.status,
+        shippedAt: orders.shippedAt,
       });
 
     if (claimed.length === 0) {
-      // Already released by another path, or order doesn't exist. No-op.
       return { released: false, orderId, restoredLines: 0, couponRowsReleased: 0 };
     }
 
-    const { items, siteId, customerId } = claimed[0];
-    const lines = (items as OrderItem[]) ?? [];
+    const { items, siteId, customerId, status, shippedAt } = claimed[0];
+    const lines = expandOrderLinesWithBundleComponents((items as OrderItem[]) ?? []);
 
-    // ── Restore reserved stock for each line. Single inventory: restore
-    //    targets INVENTORY_SITE_ID, symmetric with the order-create decrement
-    //    (the order row's own siteId is a storefront label, not a keyspace). ─
+    // Do NOT restore physical inventory on a post-shipment refund unless the
+    // parcel came back via RTO or RETURNED.
+    const alreadyShipped =
+      shippedAt !== null || status === "SHIPPED" || status === "DELIVERED";
+    const shouldRestoreStock =
+      reason === "RTO" || !(reason === "REFUNDED" && alreadyShipped);
+
     let restoredLines = 0;
-    for (const line of lines) {
-      const variantKey = line.variantSlug ?? "";
-      await tx
-        .update(inventory)
-        .set({
-          stock: sql`${inventory.stock} + ${line.qty}`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(inventory.siteId, INVENTORY_SITE_ID),
-            eq(inventory.skuId, line.skuId),
-            eq(inventory.variantSlug, variantKey),
-          ),
-        );
-      restoredLines++;
+    if (shouldRestoreStock) {
+      for (const line of lines) {
+        const variantKey = line.variantSlug ?? "";
+        await tx
+          .update(inventory)
+          .set({
+            stock: sql`${inventory.stock} + ${line.qty}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(inventory.siteId, INVENTORY_SITE_ID),
+              eq(inventory.skuId, line.skuId),
+              eq(inventory.variantSlug, variantKey),
+            ),
+          );
+        restoredLines++;
+      }
     }
 
-    // ── Release coupon usage. The ledger is the source of truth: delete
-    //    this order's redemption rows and decrement the matching coupons. ─
+    // ── Release coupon usage. ──────────────────────────────────────────
     const released = await tx
       .delete(customerCouponRedemptions)
       .where(eq(customerCouponRedemptions.orderId, orderId))
@@ -119,7 +145,12 @@ export async function releaseOrderHolds(
       orderId,
       customerId,
       type: "HOLDS_RELEASED",
-      payload: { reason, restoredLines, couponRowsReleased: released.length },
+      payload: {
+        reason,
+        restoredLines,
+        couponRowsReleased: released.length,
+        skippedStockRestoreBecauseShipped: !shouldRestoreStock,
+      },
       source: "system",
     });
 
@@ -128,6 +159,7 @@ export async function releaseOrderHolds(
       orderId,
       restoredLines,
       couponRowsReleased: released.length,
+      skippedStockRestoreBecauseShipped: !shouldRestoreStock,
     };
   });
 }
@@ -135,19 +167,15 @@ export async function releaseOrderHolds(
 /**
  * RE-ACQUIRE holds for an order whose stock was previously released — used when
  * a captured payment arrives AFTER a failed attempt already released the order
- * (a Razorpay retry: fail → release → succeed). A captured payment is ground
- * truth, so we must re-reserve the stock before marking the order PAID, or we'd
- * under-ship / oversell. Idempotent + concurrency-safe via the same holds_released
- * flag (true → false flip is the claim).
+ * (a Razorpay retry: fail → release → succeed).
  *
- * Coupon usage is intentionally NOT re-redeemed: the redemption ledger rows were
- * deleted on release and the discount is already baked into the order total, so
- * re-charging coupon usage adds risk for no customer-facing benefit. Logged so
- * it's visible if it ever matters for coupon-limit accounting.
+ * Uses `GREATEST(0, stock - qty)` so the `inventory_stock_nonneg` CHECK
+ * constraint (`stock >= 0`) can never throw a 23514 error and crash payment
+ * capture if another buyer took the last unit in the meantime.
  */
 export async function reacquireOrderHolds(
   orderId: string,
-): Promise<{ reacquired: boolean; restoredLines: number }> {
+): Promise<{ reacquired: boolean; restoredLines: number; shortfallLines: number }> {
   return db.transaction(async (tx) => {
     const claimed = await tx
       .update(orders)
@@ -160,22 +188,34 @@ export async function reacquireOrderHolds(
       });
 
     if (claimed.length === 0) {
-      // Holds were never released (normal paid path) or already re-acquired.
-      return { reacquired: false, restoredLines: 0 };
+      return { reacquired: false, restoredLines: 0, shortfallLines: 0 };
     }
 
     const { items, siteId, customerId } = claimed[0];
-    const lines = (items as OrderItem[]) ?? [];
+    const lines = expandOrderLinesWithBundleComponents((items as OrderItem[]) ?? []);
 
     let restoredLines = 0;
+    let shortfallLines = 0;
     for (const line of lines) {
       const variantKey = line.variantSlug ?? "";
-      // Re-reserve: decrement. Allowed to go negative — a PAID order must be
-      // honoured; ops can correct stock in /admin/products if it does.
+      const currentRows = await tx
+        .select({ stock: inventory.stock })
+        .from(inventory)
+        .where(
+          and(
+            eq(inventory.siteId, INVENTORY_SITE_ID),
+            eq(inventory.skuId, line.skuId),
+            eq(inventory.variantSlug, variantKey),
+          ),
+        );
+      if (currentRows.length > 0 && currentRows[0].stock < line.qty) {
+        shortfallLines++;
+      }
+
       await tx
         .update(inventory)
         .set({
-          stock: sql`${inventory.stock} - ${line.qty}`,
+          stock: sql`GREATEST(0, ${inventory.stock} - ${line.qty})`,
           updatedAt: new Date(),
         })
         .where(
@@ -193,11 +233,15 @@ export async function reacquireOrderHolds(
       orderId,
       customerId,
       type: "HOLDS_REACQUIRED",
-      payload: { restoredLines, note: "captured payment recovered a released order; coupon usage not re-applied" },
+      payload: {
+        restoredLines,
+        shortfallLines,
+        note: "captured payment recovered a released order; clamped to >= 0",
+      },
       source: "system",
     });
 
-    return { reacquired: true, restoredLines };
+    return { reacquired: true, restoredLines, shortfallLines };
   });
 }
 

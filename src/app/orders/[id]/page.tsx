@@ -231,9 +231,18 @@ export default async function OrderSuccessPage({
               {(() => {
                 const items = (order.items as OrderItem[]) ?? [];
                 const cartQty = items.reduce((n, i) => n + i.qty, 0);
-                const prepaidBonus =
+                const rawPrepaid =
                   order.paymentMethod !== "COD" ? OFFERS.prepaidDiscountINR : 0;
-                const bundleBonus = bundleDiscountInr(cartQty, order.subtotalInr);
+                const rawBundle = bundleDiscountInr(cartQty, order.subtotalInr);
+                const isBargainCoupon = Boolean(
+                  order.couponCode && order.couponCode.toUpperCase().startsWith("BG-"),
+                );
+                // When a BG- bargain coupon won over standard discounts, the entire
+                // order.discountInr comes from the bargain coupon.
+                const bargainReplacedStandard =
+                  isBargainCoupon && order.discountInr > rawPrepaid + rawBundle;
+                const prepaidBonus = bargainReplacedStandard ? 0 : rawPrepaid;
+                const bundleBonus = bargainReplacedStandard ? 0 : rawBundle;
                 const bundleName = bundleTierLabel(cartQty);
                 const couponBonus = Math.max(
                   0,

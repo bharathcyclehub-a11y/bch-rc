@@ -60,6 +60,7 @@ const STOCK_FILTER: FilterDef = {
     { value: "in", label: "In stock" },
     { value: "low", label: "Low stock" },
     { value: "out", label: "Out of stock" },
+    { value: "misconfigured", label: "Active w/ 0 or missing stock" },
     { value: "none", label: "No stock data" },
   ],
 };
@@ -106,6 +107,15 @@ function toQuery(v: ViewState): string {
 function stockMatch(p: AdminProduct, filter: string): boolean {
   if (filter === "all") return true;
   const live = p.stockKind === "live" ? p.stock : null;
+  if (filter === "misconfigured") {
+    return (
+      p.source === "catalogue" &&
+      p.status === "active" &&
+      !p.discontinued &&
+      !p.preorder &&
+      (live === null || live <= 0 || p.outCount > 0)
+    );
+  }
   if (filter === "none") return live === null;
   if (live === null) return false;
   if (filter === "out") return live <= 0 || p.outCount > 0;
@@ -139,11 +149,35 @@ export function ProductsView({
   categories,
   draftsAvailable,
   permissions,
+  misconfiguredActive = [],
+  restockSummary = { totalPending: 0, totalNotified: 0, bySkuVariant: [] },
+  stockFailures = [],
 }: {
   products: AdminProduct[];
   categories: Category[];
   draftsAvailable: boolean;
   permissions: PermissionSet;
+  misconfiguredActive?: Array<{
+    skuId: string;
+    name: string;
+    variantSlug: string;
+    stock: number | null;
+    reason: string;
+  }>;
+  restockSummary?: {
+    totalPending: number;
+    totalNotified: number;
+    bySkuVariant: Array<{ skuId: string; variantSlug: string; pendingCount: number; notifiedCount: number }>;
+  };
+  stockFailures?: Array<{
+    id: string;
+    at: string;
+    skuId: string;
+    variantSlug: string;
+    reason: string;
+    requestedQty: number | null;
+    availableStock: number | null;
+  }>;
 }) {
   const sp = useSearchParams();
   const [state, setState] = useState<ViewState>(() => readState(new URLSearchParams(sp.toString()), categories));
@@ -248,6 +282,9 @@ export function ProductsView({
             {products.length} products
             {lowCount > 0 && <span className="text-tone-warn"> · {lowCount} low stock</span>}
             {outCount > 0 && <span className="text-tone-neg"> · {outCount} out of stock</span>}
+            {restockSummary.totalPending > 0 && (
+              <span className="text-tone-info"> · {restockSummary.totalPending} restock requests</span>
+            )}
           </>
         }
         actions={
@@ -267,6 +304,91 @@ export function ProductsView({
           </>
         }
       />
+
+      {/* Inventory Diagnostics, Restock Demand & Checkout Stock Failures */}
+      {(misconfiguredActive.length > 0 || restockSummary.totalPending > 0 || stockFailures.length > 0) && (
+        <div className="mb-4 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-admin-line bg-white p-3.5 shadow-2xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-admin-muted">
+                Active w/ 0 or Missing Stock
+              </span>
+              <span
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-xs font-bold tabular-nums",
+                  misconfiguredActive.length > 0 ? "bg-tone-warn-bg text-tone-warn" : "bg-tone-pos-bg text-tone-pos",
+                )}
+              >
+                {misconfiguredActive.length}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-brand-ink-soft">
+              {misconfiguredActive.length > 0
+                ? `${misconfiguredActive.length} active variant(s) have 0 warehouse stock or missing DB rows.`
+                : "All active products have positive warehouse stock."}
+            </p>
+            {misconfiguredActive.length > 0 && (
+              <button
+                type="button"
+                onClick={() => update({ stock: "misconfigured", status: "active" })}
+                className="mt-2 text-xs font-semibold text-brand-red hover:underline cursor-pointer"
+              >
+                Filter to affected products →
+              </button>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-admin-line bg-white p-3.5 shadow-2xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-admin-muted">
+                Restock Subscribers
+              </span>
+              <span className="rounded-full bg-tone-info-bg px-2 py-0.5 text-xs font-bold tabular-nums text-tone-info">
+                {restockSummary.totalPending} waiting
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-brand-ink-soft">
+              {restockSummary.totalPending > 0
+                ? `${restockSummary.totalPending} pending alert(s) · ${restockSummary.totalNotified} notified automatically on restock.`
+                : "No pending restock requests right now."}
+            </p>
+            {restockSummary.bySkuVariant.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                {restockSummary.bySkuVariant.slice(0, 3).map((item) => (
+                  <span
+                    key={`${item.skuId}:${item.variantSlug}`}
+                    className="rounded bg-admin-subtle px-1.5 py-0.5 font-mono text-brand-ink"
+                  >
+                    {item.skuId}
+                    {item.variantSlug ? `:${item.variantSlug}` : ""} ({item.pendingCount})
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-admin-line bg-white p-3.5 shadow-2xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-admin-muted">
+                Stock Checkout Failures
+              </span>
+              <span
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-xs font-bold tabular-nums",
+                  stockFailures.length > 0 ? "bg-tone-neg-bg text-tone-neg" : "bg-tone-pos-bg text-tone-pos",
+                )}
+              >
+                {stockFailures.length} recent
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-brand-ink-soft">
+              {stockFailures.length > 0
+                ? `Last: ${stockFailures[0].skuId}${stockFailures[0].variantSlug ? ` (${stockFailures[0].variantSlug})` : ""} — ${stockFailures[0].reason}`
+                : "Zero stock-related checkout rejections logged recently."}
+            </p>
+          </div>
+        </div>
+      )}
 
       <ChipRow ariaLabel="Categories" className="mb-3">
         <Chip active={state.cat === "all"} onClick={() => update({ cat: "all" })} count={products.length}>

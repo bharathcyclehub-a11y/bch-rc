@@ -8,12 +8,22 @@ import type { NextConfig } from "next";
  */
 const isVps = process.env.NEXT_OUTPUT === "standalone";
 
-const VPS_REDIRECTS = [
-  { source: "/products", destination: "/#sku", permanent: true },
-  { source: "/products/", destination: "/#sku", permanent: true },
-  { source: "/shop", destination: "/#sku", permanent: true },
-  { source: "/collection", destination: "/#sku", permanent: true },
-  { source: "/collections", destination: "/#sku", permanent: true },
+const STORE_REDIRECTS = [
+  { source: "/products", destination: "/collections", permanent: true },
+  { source: "/products/", destination: "/collections", permanent: true },
+  { source: "/shop", destination: "/collections", permanent: true },
+  { source: "/collection", destination: "/collections", permanent: true },
+  { source: "/hub/shop", destination: "/collections", permanent: true },
+  { source: "/hub/shop/mini64", destination: "/collections/mini-rc-cars", permanent: true },
+  { source: "/hub/shop/s43", destination: "/collections/mini-rc-cars", permanent: true },
+  { source: "/hub/shop/big16", destination: "/collections/drift-racing", permanent: true },
+  { source: "/hub/shop/s20", destination: "/collections/drift-racing", permanent: true },
+  { source: "/hub/shop/polo", destination: "/collections/drift-racing", permanent: true },
+  { source: "/hub/shop/construction", destination: "/collections/construction-rc", permanent: true },
+  { source: "/hub/shop/hobby", destination: "/collections/hobby-grade", permanent: true },
+  { source: "/hub/shop/drone", destination: "/collections", permanent: true },
+  { source: "/16", destination: "/collections/drift-racing", permanent: true },
+  { source: "/16/:slug", destination: "/product/:slug", permanent: true },
   { source: "/cart", destination: "/?openCart=1", permanent: false },
 ];
 
@@ -50,7 +60,7 @@ const nextConfig: NextConfig = {
     proxyClientMaxBodySize: "20mb",
   },
   async redirects() {
-    return isVps ? VPS_REDIRECTS : [];
+    return STORE_REDIRECTS;
   },
   images: {
     // DEV-ONLY: bypass the image optimizer locally. The Next 16 + Turbopack dev

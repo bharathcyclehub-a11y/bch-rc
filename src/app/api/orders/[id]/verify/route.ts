@@ -21,6 +21,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { orders, events } from "@/db/schema";
 import { verifyRazorpaySignature, fetchAndConfirmCapture } from "@/lib/razorpay";
+import { reacquireOrderHolds } from "@/lib/inventory/release";
 import {
   enqueueShipmentJob,
   runShipmentJobOnce,
@@ -61,7 +62,6 @@ export async function POST(
     return NextResponse.json({ ok: true, orderId: id, alreadyPaid: true });
   }
   if (
-    order.paymentStatus === "FAILED" ||
     order.paymentStatus === "REFUNDED" ||
     order.paymentStatus === "PARTIALLY_REFUNDED"
   ) {
@@ -92,17 +92,6 @@ export async function POST(
     );
   }
 
-  // Authoritative capture check: signature only proves Razorpay generated this
-  // payment_id for this order_id — NOT that the money was captured. A payment
-  // that was authorized-then-reversed (bank declined post-auth), or one stuck
-  // in "authorized" state, would still carry a valid signature but never
-  // reach our merchant balance. We hit Razorpay's API and require
-  // status==="captured" + matching order_id + matching amount before
-  // committing PAID. Otherwise the customer thinks they paid but we never
-  // received the money — and the auto-fulfilment trigger would ship goods
-  // for free.
-  // Partial-prepaid CoD captures only the upfront confirmation fee, not
-  // the full total. Same discriminator as the webhook handler.
   const isPartialPrepaidCod =
     order.paymentMethod === "COD" && order.confirmationFeeInr > 0;
   const expectedAmountPaise = isPartialPrepaidCod
@@ -129,6 +118,12 @@ export async function POST(
       { error: `Payment not yet confirmed: ${confirm.reason}` },
       { status: 402 },
     );
+  }
+
+  // If a prior failed attempt in the Razorpay modal triggered the payment.failed
+  // webhook and released holds before this retry succeeded, re-acquire the holds.
+  if (order.holdsReleased) {
+    await reacquireOrderHolds(id);
   }
 
   await db

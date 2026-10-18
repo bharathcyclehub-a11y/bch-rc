@@ -235,6 +235,22 @@ export function StatusSection({ form, mode }: { form: ProductForm; mode: EditorM
           );
         })}
       </fieldset>
+      {mode === "catalogue" && (
+        <div className="space-y-3 border-t border-admin-line pt-3">
+          <Switch
+            checked={v.preorder}
+            onChange={(c) => set("preorder", c)}
+            label="Enable Pre-order"
+            description="Allow customers to purchase as a Pre-order even when Coming Soon or 0 stock"
+          />
+          <Switch
+            checked={v.discontinued}
+            onChange={(c) => set("discontinued", c)}
+            label="Mark as Discontinued"
+            description="Retire model on storefront — disables purchasing and shows replacement models"
+          />
+        </div>
+      )}
       <p className="text-xs leading-4 text-admin-muted">
         {mode === "catalogue"
           ? "Catalogue products can't be deleted — hide them to take them off the storefront. Nothing is lost."
@@ -255,7 +271,7 @@ export function OrganisationSection({
 }) {
   const { values: v, set, errors } = form;
   return (
-    <EditorSection id="organisation" title="Organisation">
+    <EditorSection id="organisation" title="Organisation & Merchandising">
       {readOnly ? (
         <>
           <ReadOnlyText label="Category">{categories.find((c) => c.key === v.category)?.label ?? v.category}</ReadOnlyText>
@@ -293,26 +309,52 @@ export function OrganisationSection({
           ))}
         </Select>
       </Field>
+      {readOnly && (
+        <>
+          <Switch
+            checked={v.featured}
+            onChange={(c) => set("featured", c)}
+            label="Featured product"
+            description="Prioritise at the top of category grids and recommendation rails"
+          />
+          <TagsField
+            label="Replacement / Alternative SKU IDs"
+            hint="Press Enter to add SKU IDs (e.g. porsche, drift-inferno) shown when sold out or discontinued"
+            tags={v.alternatives}
+            onChange={(alts) => set("alternatives", alts)}
+          />
+        </>
+      )}
       {!readOnly && <TagsField tags={v.tags} onChange={(t) => set("tags", t)} />}
       {readOnly && <p className="text-xs text-admin-muted">Category and scale are managed in the product catalogue.</p>}
     </EditorSection>
   );
 }
 
-function TagsField({ tags, onChange }: { tags: string[]; onChange: (t: string[]) => void }) {
+function TagsField({
+  tags,
+  onChange,
+  label = "Tags",
+  hint = "Press Enter to add · up to 10",
+}: {
+  tags: string[];
+  onChange: (t: string[]) => void;
+  label?: string;
+  hint?: string;
+}) {
   const [draft, setDraft] = useState("");
   const add = () => {
-    const t = draft.trim().toLowerCase().replace(/,/g, "").slice(0, 24);
+    const t = draft.trim().replace(/,/g, "").slice(0, 32);
     if (t && !tags.includes(t) && tags.length < 10) onChange([...tags, t]);
     setDraft("");
   };
   return (
-    <Field label="Tags" optional hint="Press Enter to add · up to 10">
+    <Field label={label} optional hint={hint}>
       <div className="flex min-h-9 flex-wrap items-center gap-1.5 rounded-lg border border-admin-line-strong bg-white p-1.5 focus-within:border-brand-ink focus-within:ring-2 focus-within:ring-brand-red/20">
         {tags.map((t) => (
           <span key={t} className="inline-flex h-7 items-center gap-1 rounded-md bg-admin-subtle pl-2 pr-1 text-xs font-medium text-brand-ink">
             {t}
-            <button type="button" onClick={() => onChange(tags.filter((x) => x !== t))} aria-label={`Remove tag ${t}`} className="grid h-5 w-5 place-items-center rounded text-admin-muted hover:bg-white hover:text-brand-ink">
+            <button type="button" onClick={() => onChange(tags.filter((x) => x !== t))} aria-label={`Remove ${t}`} className="grid h-5 w-5 place-items-center rounded text-admin-muted hover:bg-white hover:text-brand-ink">
               <X size={12} aria-hidden />
             </button>
           </span>
@@ -329,8 +371,8 @@ function TagsField({ tags, onChange }: { tags: string[]; onChange: (t: string[])
             }
           }}
           onBlur={add}
-          aria-label="Add tag"
-          placeholder={tags.length ? "" : "e.g. drift, gift"}
+          aria-label={label}
+          placeholder={tags.length ? "" : "e.g. porsche, drift-inferno"}
           className="h-7 min-w-24 flex-1 bg-transparent px-1 text-sm focus:outline-none"
         />
       </div>
@@ -347,7 +389,20 @@ export function InventorySection({ form, mode, lowThreshold }: { form: ProductFo
           Stock is tracked per variant in the live inventory table — edit counts in <b className="font-semibold">Variants</b>. Orders
           reserve units at checkout and release them automatically if unpaid.
         </p>
-        <p className="text-xs text-admin-muted">Low-stock alert at {lowThreshold} units (store-wide setting).</p>
+        <Field
+          label="Low-stock alert threshold"
+          htmlFor="field-lowStockThreshold"
+          error={errors.lowStockThreshold}
+          hint={`Units per variant under which the amber Low Stock badge shows (default: ${lowThreshold})`}
+        >
+          <Input
+            id="field-lowStockThreshold"
+            inputMode="numeric"
+            value={v.lowStockThreshold}
+            onChange={(e) => set("lowStockThreshold", e.target.value.replace(/[^\d]/g, ""))}
+            className="w-28"
+          />
+        </Field>
       </EditorSection>
     );
   return (
@@ -370,3 +425,4 @@ export function InventorySection({ form, mode, lowThreshold }: { form: ProductFo
     </EditorSection>
   );
 }
+

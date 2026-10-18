@@ -95,6 +95,10 @@ export type AdminProduct = {
   outCount: number;
   overridden: boolean;
   internal: boolean;
+  discontinued: boolean;
+  preorder: boolean;
+  featured: boolean;
+  alternatives: string[];
   /** Public product page when it's reachable on the storefront, else null. */
   storefrontPath: string | null;
   updatedAt: string | null;
@@ -116,6 +120,11 @@ async function loadOverrides(siteIds: string[], skuId?: string): Promise<Map<str
         hidden: productOverrides.hidden,
         comingSoon: productOverrides.comingSoon,
         badge: productOverrides.badge,
+        discontinued: productOverrides.discontinued,
+        preorder: productOverrides.preorder,
+        lowStockThreshold: productOverrides.lowStockThreshold,
+        featured: productOverrides.featured,
+        alternatives: productOverrides.alternatives,
         updatedAt: productOverrides.updatedAt,
         updatedBy: productOverrides.updatedBy,
       })
@@ -127,7 +136,28 @@ async function loadOverrides(siteIds: string[], skuId?: string): Promise<Map<str
       );
     return new Map(rows.map((r) => [r.skuId, r]));
   } catch {
-    return new Map();
+    try {
+      const rows = await db
+        .select({
+          skuId: productOverrides.skuId,
+          priceInr: productOverrides.priceInr,
+          mrpInr: productOverrides.mrpInr,
+          hidden: productOverrides.hidden,
+          comingSoon: productOverrides.comingSoon,
+          badge: productOverrides.badge,
+          updatedAt: productOverrides.updatedAt,
+          updatedBy: productOverrides.updatedBy,
+        })
+        .from(productOverrides)
+        .where(
+          skuId
+            ? and(inArray(productOverrides.siteId, siteIds), eq(productOverrides.skuId, skuId))
+            : inArray(productOverrides.siteId, siteIds),
+        );
+      return new Map(rows.map((r) => [r.skuId, r]));
+    } catch {
+      return new Map();
+    }
   }
 }
 
@@ -163,6 +193,10 @@ function toCatalogueProduct(
   position: number,
 ): AdminProduct {
   const sku = applyOverride(base, ov);
+  const threshold =
+    typeof sku.lowStockThreshold === "number" && sku.lowStockThreshold >= 0
+      ? sku.lowStockThreshold
+      : LOW_STOCK_THRESHOLD;
   const variants: AdminVariant[] = sku.colors?.length
     ? sku.colors.map((c) => ({
         slug: c.slug,
@@ -200,13 +234,17 @@ function toCatalogueProduct(
     status,
     badge: sku.badge ?? null,
     variants,
-    ...summarise(variants, LOW_STOCK_THRESHOLD),
+    ...summarise(variants, threshold),
     stockKind: "live",
-    lowThreshold: LOW_STOCK_THRESHOLD,
+    lowThreshold: threshold,
     overridden: !!ov,
     internal: !!sku.internal,
+    discontinued: !!sku.discontinued,
+    preorder: !!sku.preorder,
+    featured: !!sku.featured,
+    alternatives: sku.alternatives ?? [],
     storefrontPath:
-      status === "active" && !sku.bundle ? (sku.scale === "1:16" ? `/16/${sku.slug}` : `/product/${sku.slug}`) : null,
+      status !== "hidden" && !sku.bundle ? (sku.scale === "1:16" ? `/16/${sku.slug}` : `/product/${sku.slug}`) : null,
     updatedAt: ov?.updatedAt ? new Date(ov.updatedAt).toISOString() : null,
     updatedBy: ov?.updatedBy ?? null,
     position,
@@ -274,6 +312,10 @@ function toDraftProduct(p: DraftRow, vs: DraftVariantRow[], position: number): A
     lowThreshold: p.lowStockThreshold,
     overridden: false,
     internal: false,
+    discontinued: false,
+    preorder: false,
+    featured: false,
+    alternatives: [],
     storefrontPath: null,
     updatedAt: p.updatedAt.toISOString(),
     updatedBy: p.updatedBy,
@@ -422,6 +464,8 @@ export const PRODUCT_EVENT_TYPES = [
   "PRODUCT_DRAFT_CREATED",
   "PRODUCT_DRAFT_UPDATED",
   "PRODUCT_DRAFT_STATUS",
+  "ORDER_STOCK_FAILURE",
+  "RESTOCK_ALERT_TRIGGERED",
 ] as const;
 
 export type ProductActivity = {
@@ -475,6 +519,26 @@ function describe(
       const label = s in PRODUCT_STATUS_META ? PRODUCT_STATUS_META[s as ProductStatus].label : s;
       return { ...base, title: `Status set to ${label}`, detail: null, tone: s === "archived" ? "neutral" : "info" };
     }
+    case "ORDER_STOCK_FAILURE": {
+      const reason = typeof p.reason === "string" ? p.reason : "INSUFFICIENT_STOCK";
+      const reqQty = typeof p.requestedQty === "number" ? ` · requested ${p.requestedQty}` : "";
+      const availQty = typeof p.availableStock === "number" ? `, available ${p.availableStock}` : "";
+      return {
+        ...base,
+        title: "Checkout stock failure",
+        detail: `${v || "Default"} (${reason}${reqQty}${availQty})`,
+        tone: "negative",
+      };
+    }
+    case "RESTOCK_ALERT_TRIGGERED": {
+      const count = typeof p.notifiedCount === "number" ? p.notifiedCount : 0;
+      return {
+        ...base,
+        title: "Restock alerts triggered",
+        detail: `${v || "Default"} · ${count} subscriber${count === 1 ? "" : "s"} notified/queued`,
+        tone: "positive",
+      };
+    }
     default:
       return { ...base, title: e.type, detail: null, tone: "neutral" };
   }
@@ -508,5 +572,48 @@ export async function loadProductActivity(
   }
 }
 
+export type StockFailureEntry = {
+  id: string;
+  at: string;
+  skuId: string;
+  variantSlug: string;
+  reason: string;
+  requestedQty: number | null;
+  availableStock: number | null;
+};
+
+export async function loadStockFailures(siteIds: string[], skuId?: string, limit = 15): Promise<StockFailureEntry[]> {
+  if (siteIds.length === 0) return [];
+  try {
+    const rows = await db
+      .select({ id: events.id, payload: events.payload, createdAt: events.createdAt })
+      .from(events)
+      .where(
+        and(
+          eq(events.type, "ORDER_STOCK_FAILURE"),
+          sql`(${events.siteId} IS NULL OR ${inArray(events.siteId, siteIds)})`,
+          skuId ? sql`${events.payload}->>'skuId' = ${skuId}` : sql`true`,
+        ),
+      )
+      .orderBy(desc(events.createdAt))
+      .limit(limit);
+    return rows.map((r) => {
+      const p = (r.payload ?? {}) as Record<string, unknown>;
+      return {
+        id: r.id,
+        at: r.createdAt.toISOString(),
+        skuId: String(p.skuId ?? ""),
+        variantSlug: String(p.variantSlug ?? ""),
+        reason: String(p.reason ?? "INSUFFICIENT_STOCK"),
+        requestedQty: typeof p.requestedQty === "number" ? p.requestedQty : null,
+        availableStock: typeof p.availableStock === "number" ? p.availableStock : null,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 /** "₹1,199" for change logs. */
 export const inr = (n: number | null | undefined) => (n == null ? "—" : formatINR(n));
+

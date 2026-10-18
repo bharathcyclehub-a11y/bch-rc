@@ -1,33 +1,115 @@
-import {
-  getHubMiniSkus,
-  getHubBig16Skus,
-  getHub20Skus,
-  getHubConstructionSkus,
-  getHubPoloSkus,
-  getHub43Skus,
-  getHubHobbySkus,
-  type Sku,
-} from "@/lib/products";
+/**
+ * Hub category definitions — bridged directly to the 4 approved primary
+ * shopping categories in `src/lib/categories.ts` while preserving full
+ * backward compatibility with `HubCat` (`key`, `label`, `img`, `skus`) and
+ * `getHubCategory(key)`.
+ *
+ * Approved 4 Primary Categories:
+ *   1. Mini RC Cars         (/collections/mini-rc-cars)
+ *   2. Drift & Racing RC    (/collections/drift-racing)
+ *   3. Construction RC      (/collections/construction-rc)
+ *   4. Hobby Grade RC       (/collections/hobby-grade)
+ *
+ * Keeps `"Drone — Coming Soon"` outside the 4 primary shopping categories.
+ */
 
-/** A hub Shop category tile — key, label, round-tile image, and its products. */
-export type HubCat = { key: string; label: string; img: string | null; skus: Sku[] };
+import { type Sku } from "./products";
+import {
+  PRIMARY_CATEGORIES,
+  getCategoryBySlug,
+  getSkusForCategory,
+  type PrimaryCategorySlug,
+  type LegacyHubCategoryKey,
+  type CategoryShortcut,
+} from "./categories";
+
+export type HubCategoryKey = PrimaryCategorySlug | LegacyHubCategoryKey;
+
+export interface HubCategory {
+  key: string;
+  /** Compatible with legacy HubCat.label */
+  label: string;
+  /** Compatible with legacy HubCat.img */
+  img: string | null;
+  /** Compatible with legacy HubCat.skus */
+  skus: Sku[];
+  /** Canonical collection URL */
+  url: `/collections/${PrimaryCategorySlug}`;
+  /** Short pill label */
+  scale: string;
+  /** Primary display title */
+  title: string;
+  /** Approved SEO / collection heading */
+  subtitle: string;
+  /** Description copy */
+  blurb: string;
+  /** Price floor in INR (online price) */
+  priceFloorINR: number;
+  /** Representative circular thumbnail image */
+  image: string;
+  /** Alt text for the category image */
+  imageAlt: string;
+  /** 3 genuine product images for preview cards */
+  heroImages: [string, string, string];
+  /** Scale or subtype shortcut links */
+  shortcuts: CategoryShortcut[];
+  /** Key highlights */
+  highlights: string[];
+  comingSoon?: boolean;
+}
+
+/** Alias for backward compatibility with components importing `HubCat` */
+export type HubCat = HubCategory;
+
+export const HUB_CATEGORIES: HubCategory[] = PRIMARY_CATEGORIES.map((cat) => {
+  const skus = getSkusForCategory(cat.slug, { includeHidden: false });
+  return {
+    key: cat.slug,
+    label: cat.name,
+    img: cat.image,
+    skus,
+    url: cat.url,
+    scale: cat.shortLabel,
+    title: cat.name,
+    subtitle: cat.seoTargetHeading,
+    blurb: cat.description,
+    priceFloorINR: cat.priceFloorINR,
+    image: cat.image,
+    imageAlt: cat.imageAlt,
+    heroImages: cat.heroImages,
+    shortcuts: cat.shortcuts,
+    highlights: cat.highlights,
+    comingSoon: !cat.published,
+  };
+});
 
 /**
- * The hub Shop categories. Live tiles pull real products (Mini 1:64, Big 1:16,
- * 1:20, Construction — the last two are coming-soon teasers); the rest are
- * empty placeholders shown as "soon". Shared by the hub Shop preview and the
- * per-category pages at /hub/shop/[category].
+ * Lookup a HubCategory by either its new primary slug (`mini-rc-cars`,
+ * `drift-racing`, `construction-rc`, `hobby-grade`) or a legacy hub key
+ * (`mini64`, `big16`, `s20`, `construction`, `polo`, `s43`, `hobby`).
  */
-export const HUB_CATEGORIES: HubCat[] = [
-  { key: "mini64", label: "Mini RC · 1:64", img: "/landing/cat-crawlers.webp", skus: getHubMiniSkus() },
-  { key: "big16", label: "Big Drift · 1:16", img: "/landing/cat-drift.webp", skus: getHubBig16Skus() },
-  { key: "s20", label: "1:20 Scale", img: "/landing/cat-s20.webp", skus: getHub20Skus() },
-  { key: "construction", label: "Construction", img: "/landing/cat-construction.webp", skus: getHubConstructionSkus() },
-  { key: "polo", label: "Polo", img: "/landing/cat-polo.webp", skus: getHubPoloSkus() },
-  { key: "s43", label: "1:43 Scale", img: "/landing/cat-s43.jpg", skus: getHub43Skus() },
-  { key: "drone", label: "Drone", img: "/landing/cat-drone.webp", skus: [] },
-  { key: "hobby", label: "Hobby Grade", img: "/landing/cat-hobby.jpg", skus: getHubHobbySkus() },];
+export function getHubCategory(key: string): HubCategory | undefined {
+  const direct = HUB_CATEGORIES.find((c) => c.key === key);
+  if (direct) return direct;
+  const resolved = getCategoryBySlug(key);
+  if (!resolved) return undefined;
+  return HUB_CATEGORIES.find((c) => c.key === resolved.slug);
+}
 
-export function getHubCategory(key: string): HubCat | undefined {
-  return HUB_CATEGORIES.find((c) => c.key === key);
+/**
+ * Resolve a category (by `HubCategory` object, primary slug, or legacy key)
+ * to its matching SKUs.
+ */
+export function skusForCategory(
+  catOrKey: HubCategory | string,
+  includeHidden = false,
+  overridesMap?: Record<string, { hidden?: boolean | null }> | null,
+): Sku[] {
+  const key = typeof catOrKey === "string" ? catOrKey : catOrKey.key;
+  const resolved = getCategoryBySlug(key);
+  if (!resolved) return [];
+  return getSkusForCategory(resolved.slug, {
+    includeHidden,
+    overridesMap,
+  });
 }

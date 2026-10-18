@@ -1,12 +1,25 @@
 "use client";
 
+import { useEffect } from "react";
 import dynamic from "next/dynamic";
+import { useCart } from "@/lib/cart-store";
 
-// Mount the shared cart drawer on the hub so the header bag + product "Add to
-// cart" open a working cart that checks out via the standard /checkout. Loaded
-// client-only (ssr:false), same as the 1:64 home.
 const CartDrawer = dynamic(() => import("@/components/CartDrawer"), { ssr: false });
+const WhatsAppFab = dynamic(() => import("@/components/WhatsAppFab"), { ssr: false });
 
 export default function HubClientUi() {
-  return <CartDrawer />;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get("openCart") === "1") {
+      useCart.getState().open();
+    }
+  }, []);
+
+  return (
+    <>
+      <WhatsAppFab />
+      <CartDrawer />
+    </>
+  );
 }

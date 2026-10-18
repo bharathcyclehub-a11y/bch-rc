@@ -4,7 +4,7 @@ import { waLink } from "@/lib/config";
 import { THEME } from "@/lib/theme";
 
 const QUICK_LINKS = [
-  { label: "Shop", href: "/#sku" },
+  { label: "Shop", href: "/#hub-shop" },
   { label: "Track order", href: "/support/track" },
   { label: "Support centre", href: "/support" },
   { label: "Privacy", href: "/policies/privacy" },

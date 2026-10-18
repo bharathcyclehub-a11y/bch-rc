@@ -1,59 +1,79 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Check, Plus } from "lucide-react";
 import type { Sku } from "@/lib/products";
-import { defaultVariantSlug, getVisibleProducts } from "@/lib/products";
+import { getVisibleProducts } from "@/lib/products";
 import { formatINR, cn } from "@/lib/utils";
 import { useCart } from "@/lib/cart-store";
 import { bundleDiscountInr } from "@/lib/config";
+import { useLiveStock } from "@/lib/use-live-stock";
+import { resolveProductAvailability } from "@/lib/availability";
 
 /**
- * "Pair it" bundle module — sits below the Buy Now button on the PDP. Shows
- * the current SKU + a recommended pair-with car, with a single-tap "add both"
- * CTA. AOV-lifting upsell at the decision moment.
- *
- * Pricing MUST mirror what checkout actually charges: the bundle is a FLAT
- * ₹298 (2-car) bonus off the real subtotal — NOT a fixed ₹2,299 total. The old
- * fixed price assumed two base-price cars, so on a premium PDP (e.g. Monster
- * Truck ₹1,899) it under-quoted by ~₹600 and the customer was billed more at
- * checkout. We now derive the bonus from the same bundleDiscountInr() the
- * order creator uses, so the page and the bill always agree.
- *
- * Recommended pair = the first visible SKU that isn't the current one. Hero
- * (Pocket Porsche) is pinned first in the products list so most PDPs pair
- * with the Porsche by default; the Porsche pairs with BMW.
+ * "Pair it" bundle module — sits below the Buy Now button on the PDP.
+ * Uses live stock to ensure neither the primary SKU nor the recommended
+ * companion SKU is out of stock.
  */
-export default function PDPBundleUpsell({ sku }: { sku: Sku }) {
+export default function PDPBundleUpsell({
+  sku,
+  selectedColorSlug,
+}: {
+  sku: Sku;
+  selectedColorSlug?: string | null;
+}) {
   const router = useRouter();
-  const others = getVisibleProducts().filter((p) => p.id !== sku.id);
+  const { stockMap, overridesMap } = useLiveStock();
+
+  const currentAvail = useMemo(
+    () => resolveProductAvailability(sku, stockMap, overridesMap?.[sku.id]),
+    [sku, stockMap, overridesMap],
+  );
+
+  const availableOthers = useMemo(() => {
+    if (!stockMap) return [];
+    return getVisibleProducts().filter((p) => {
+      if (p.id === sku.id || p.id === "construction-3pack") return false;
+      const avail = resolveProductAvailability(p, stockMap, overridesMap?.[p.id]);
+      return avail.purchasable;
+    });
+  }, [sku.id, stockMap, overridesMap]);
 
   const [includePair, setIncludePair] = useState(true);
-  // Pair suggestion rotates per visit (random), instead of always Porsche.
-  // Deterministic first-other for SSR, then a random one after mount (no
-  // hydration mismatch).
-  const [pair, setPair] = useState<Sku | null>(others[0] ?? null);
+  const [pair, setPair] = useState<Sku | null>(null);
+
   useEffect(() => {
-    if (others.length > 0) setPair(others[Math.floor(Math.random() * others.length)]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sku.id]);
+    if (availableOthers.length > 0) {
+      setPair((prev) => {
+        if (prev && availableOthers.some((o) => o.id === prev.id)) return prev;
+        return availableOthers[Math.floor(Math.random() * availableOthers.length)];
+      });
+    } else {
+      setPair(null);
+    }
+  }, [availableOthers]);
 
-  if (!pair) return null;
+  // Do not render the bundle upsell if the current SKU is unavailable or no in-stock companion exists
+  if (!stockMap || !currentAvail.purchasable || !pair) return null;
 
-  // 2-car bundle bonus — the exact value checkout subtracts (now a % of the
-  // pair subtotal). Price the pair as (both retails − bonus), never a fixed
-  // total, so the page and the bill always agree.
+  const pairAvail = resolveProductAvailability(pair, stockMap, overridesMap?.[pair.id]);
+  if (!pairAvail.purchasable) return null;
+
   const pairSavings = bundleDiscountInr(2, sku.retailINR + pair.retailINR);
   const singleTotal = sku.retailINR;
   const pairTotal = sku.retailINR + pair.retailINR - pairSavings;
   const finalTotal = includePair ? pairTotal : singleTotal;
 
   function addBundle() {
+    if (!currentAvail.purchasable || !pair) return;
     const cart = useCart.getState();
-    cart.add(sku.id, defaultVariantSlug(sku), 1);
-    if (includePair && pair) cart.add(pair.id, defaultVariantSlug(pair), 1);
+    const primaryVariant = selectedColorSlug ?? currentAvail.firstAvailableVariantSlug;
+    cart.add(sku.id, primaryVariant, 1, currentAvail.maxOrderQty);
+    if (includePair && pairAvail.purchasable) {
+      cart.add(pair.id, pairAvail.firstAvailableVariantSlug, 1, pairAvail.maxOrderQty);
+    }
     router.push("/checkout");
   }
 
@@ -106,10 +126,10 @@ export default function PDPBundleUpsell({ sku }: { sku: Sku }) {
           type="button"
           onClick={() => setIncludePair((v) => !v)}
           className={cn(
-            "w-full flex items-center gap-3 p-2 rounded-lg border-2 transition-colors text-left",
+            "w-full flex items-center gap-3 p-2 rounded-lg border-2 transition-colors text-left cursor-pointer",
             includePair
               ? "border-brand-red bg-white"
-              : "border-brand-line bg-white/50"
+              : "border-brand-line bg-white/50",
           )}
         >
           <div className="relative w-11 h-11 sm:w-14 sm:h-14 shrink-0 rounded-lg overflow-hidden bg-white border border-brand-line">
@@ -137,7 +157,7 @@ export default function PDPBundleUpsell({ sku }: { sku: Sku }) {
               "w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors",
               includePair
                 ? "bg-brand-red border-brand-red text-white"
-                : "border-brand-line"
+                : "border-brand-line",
             )}
           >
             {includePair && <Check size={12} strokeWidth={3} />}
@@ -148,7 +168,7 @@ export default function PDPBundleUpsell({ sku }: { sku: Sku }) {
         <div className="pt-1 flex items-center justify-between gap-3">
           <div>
             <p className="text-[10px] font-mono uppercase tracking-widest text-brand-ink-soft">
-              Bundle price
+              Bundle price (COD)
             </p>
             <p className="text-lg sm:text-xl font-bold text-brand-ink leading-none">
               {formatINR(finalTotal)}
@@ -162,7 +182,7 @@ export default function PDPBundleUpsell({ sku }: { sku: Sku }) {
           <button
             type="button"
             onClick={addBundle}
-            className="bg-brand-ink hover:bg-black text-white px-4 py-2.5 sm:px-5 sm:py-3 rounded-xl font-bold text-sm transition-colors"
+            className="bg-brand-ink hover:bg-black text-white px-4 py-2.5 sm:px-5 sm:py-3 rounded-xl font-bold text-sm transition-colors cursor-pointer"
           >
             {includePair ? "Buy bundle" : "Buy single"} →
           </button>

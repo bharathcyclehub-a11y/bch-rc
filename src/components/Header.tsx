@@ -4,21 +4,44 @@ import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ShoppingBag, Menu, X, ChevronLeft } from "lucide-react";
+import { ShoppingBag, Menu, X, ChevronLeft, ChevronDown } from "lucide-react";
 import { WhatsAppIcon } from "@/components/BrandIcons";
 import { THEME, waLink } from "@/lib/theme";
 import { useCart, getCartCount } from "@/lib/cart-store";
 import { trackFunnel } from "@/lib/funnel-client";
 import { cn } from "@/lib/utils";
 
-// Top nav. The hub is the SINGLE storefront now, so Shop/Bundles anchor into
-// the homepage's own sections. The old "Shop by size" menu — which pointed at
-// the retired 1:64 / 1:16 split stores — has been removed.
-const NAV_BEFORE = [
-  { label: "Shop", href: "/#hub-shop" },
-  { label: "Bundles", href: "/#bundles" },
+// Four approved categories inside the Shop dropdown
+const SHOP_CATEGORIES = [
+  {
+    label: "Mini RC Cars",
+    sub: "1:64 & 1:43 Scale",
+    badge: "1:64",
+    href: "/collections/mini-rc-cars",
+  },
+  {
+    label: "Drift & Racing RC",
+    sub: "1:16 & 1:20 Drift & Track",
+    badge: "1:16",
+    href: "/collections/drift-racing",
+  },
+  {
+    label: "Construction RC",
+    sub: "Excavators & Trucks",
+    badge: "RC",
+    href: "/collections/construction-rc",
+  },
+  {
+    label: "Hobby Grade RC",
+    sub: "4WD Rock Crawlers & Off-Road",
+    badge: "4WD",
+    href: "/collections/hobby-grade",
+  },
 ];
-const NAV_AFTER = [
+
+// Top nav links: exactly Shop | Bundles | Track Order | Support
+const NAV_LINKS = [
+  { label: "Bundles", href: "/#bundles" },
   { label: "Track Order", href: "/track" },
   { label: "Support", href: "/support" },
 ];
@@ -41,8 +64,7 @@ export default function Header() {
   // Back button — shown on every non-home page so the buyer always has a
   // visible escape hatch alongside the browser back gesture. Tries
   // router.back() first (preserves Next.js state/scroll); falls back to
-  // pushing "/" (the hub) when there's no in-app history (e.g. deep-link
-  // landings, Razorpay return URLs that opened a fresh tab).
+  // pushing "/" (the hub) when there's no in-app history.
   const handleBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) {
       router.back();
@@ -53,6 +75,7 @@ export default function Header() {
 
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobileShopOpen, setMobileShopOpen] = useState(false);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
@@ -65,7 +88,7 @@ export default function Header() {
   // always render against the solid white header bg.
   // Also force solid style when the mobile menu is open — otherwise the
   // white logo / hamburger / cart icon are invisible against the open
-  // white drawer, and the user has no way to close the menu.
+  // white drawer.
   const useSolidStyle = !isHomePage || scrolled || mobileOpen;
 
   return (
@@ -87,13 +110,13 @@ export default function Header() {
                 onClick={handleBack}
                 aria-label="Go back"
                 className={cn(
-                  "inline-flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 rounded-full transition-colors",
+                  "inline-flex items-center justify-center h-8 w-8 sm:h-9 sm:w-9 rounded-full transition-colors",
                   useSolidStyle
                     ? "hover:bg-brand-cream text-brand-ink"
                     : "hover:bg-white/10 text-white"
                 )}
               >
-                <ChevronLeft size={20} strokeWidth={2.5} />
+                <ChevronLeft size={19} strokeWidth={2.5} />
               </button>
             )}
             {/* Logo */}
@@ -114,32 +137,88 @@ export default function Header() {
             </Link>
           </div>
 
-          {/* Desktop nav */}
+          {/* Desktop nav: Shop | Bundles | Track Order | Support */}
           <nav className="hidden lg:flex items-center gap-8">
-            {[...NAV_BEFORE, ...NAV_AFTER].map((link) => (
+            {/* Shop dropdown */}
+            <div className="relative group">
               <Link
-                key={link.href}
-                href={link.href}
+                href="/#hub-shop"
                 className={cn(
-                  "text-sm font-medium transition-colors",
+                  "inline-flex items-center gap-1 text-sm font-medium transition-colors",
                   useSolidStyle
                     ? "text-brand-ink-soft hover:text-brand-red"
                     : "text-white/80 hover:text-white"
                 )}
+                aria-haspopup="true"
               >
-                {link.label}
+                Shop
+                <ChevronDown
+                  size={15}
+                  className="transition-transform duration-200 group-hover:rotate-180"
+                />
               </Link>
-            ))}
+
+              {/* Dropdown panel */}
+              <div className="invisible absolute left-0 top-full z-50 w-72 pt-3 opacity-0 transition-all duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+                <div className="overflow-hidden rounded-2xl border border-brand-line bg-white text-brand-ink shadow-xl">
+                  <div className="p-1.5 space-y-1">
+                    {SHOP_CATEGORIES.map((cat) => (
+                      <Link
+                        key={cat.href}
+                        href={cat.href}
+                        className="flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors hover:bg-brand-cream group/item"
+                      >
+                        <span className="grid h-9 w-11 shrink-0 place-items-center rounded-lg font-mono text-xs font-bold bg-brand-red text-white group-hover/item:scale-105 transition-transform">
+                          {cat.badge}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <span className="block truncate text-sm font-semibold text-brand-ink group-hover/item:text-brand-red transition-colors">
+                            {cat.label}
+                          </span>
+                          <span className="block truncate text-[11px] text-brand-ink-soft">
+                            {cat.sub}
+                          </span>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+
+                  <Link
+                    href="/collections"
+                    className="flex items-center justify-between border-t border-brand-line bg-brand-cream px-4 py-2.5 text-xs font-semibold text-brand-red hover:bg-brand-cream/80 transition-colors"
+                  >
+                    <span>View All Categories</span>
+                    <span aria-hidden>→</span>
+                  </Link>
+                </div>
+              </div>
+            </div>
+
+            {/* Bundles | Track Order | Support */}
+            {NAV_LINKS.map((link) => {
+              const isActive = pathname === link.href;
+              return (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  aria-current={isActive ? "page" : undefined}
+                  className={cn(
+                    "text-sm font-medium transition-colors",
+                    useSolidStyle
+                      ? isActive
+                        ? "font-bold text-brand-red"
+                        : "text-brand-ink-soft hover:text-brand-red"
+                      : "text-white/80 hover:text-white"
+                  )}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
           </nav>
 
           {/* Right cluster: WhatsApp + cart + mobile menu */}
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* WhatsApp pill - mobile shows icon-only to save thumb-zone real
-                estate, sm+ adds the "Chat" label. Was previously hidden below
-                sm, leaving ~80% of (mobile) traffic without a header CTA to
-                contact us. The persistent FAB stays - this pill is the
-                always-visible-at-top backup. Prefill is Hinglish so a DM
-                lands qualified instead of generic. */}
             <a
               href={waLink("Hi! Mujhe ye Pocket RC drift car chahiye — price aur COD details bhej do?")}
               target="_blank"
@@ -192,11 +271,72 @@ export default function Header() {
       {mobileOpen && (
         <div className="lg:hidden bg-white border-t border-brand-line shadow-lg">
           <nav className="px-4 py-3 flex flex-col">
-            {[...NAV_BEFORE, ...NAV_AFTER].map((link) => (
+            {/* Shop Accordion */}
+            <div className="border-b border-brand-line">
+              <button
+                type="button"
+                onClick={() => setMobileShopOpen((v) => !v)}
+                aria-expanded={mobileShopOpen}
+                className="flex w-full items-center justify-between py-3 text-base font-semibold text-brand-ink hover:text-brand-red"
+              >
+                <span>Shop</span>
+                <ChevronDown
+                  size={18}
+                  className={cn(
+                    "transition-transform duration-200 text-brand-ink-soft",
+                    mobileShopOpen && "rotate-180"
+                  )}
+                />
+              </button>
+
+              {mobileShopOpen && (
+                <div className="pb-3 pl-2 pr-1 space-y-1">
+                  {SHOP_CATEGORIES.map((cat) => (
+                    <Link
+                      key={cat.href}
+                      href={cat.href}
+                      onClick={() => {
+                        setMobileOpen(false);
+                        setMobileShopOpen(false);
+                      }}
+                      className="flex items-center gap-3 rounded-lg px-2.5 py-2 hover:bg-brand-cream transition-colors"
+                    >
+                      <span className="grid h-7 w-9 shrink-0 place-items-center rounded bg-brand-red text-white font-mono text-[10px] font-bold">
+                        {cat.badge}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <span className="block text-sm font-medium text-brand-ink">
+                          {cat.label}
+                        </span>
+                        <span className="block text-[11px] text-brand-ink-soft">
+                          {cat.sub}
+                        </span>
+                      </div>
+                    </Link>
+                  ))}
+                  <Link
+                    href="/collections"
+                    onClick={() => {
+                      setMobileOpen(false);
+                      setMobileShopOpen(false);
+                    }}
+                    className="flex items-center justify-between rounded-lg px-3 py-2 text-xs font-semibold text-brand-red hover:bg-brand-cream transition-colors"
+                  >
+                    <span>View All Categories</span>
+                    <span aria-hidden>→</span>
+                  </Link>
+                </div>
+              )}
+            </div>
+
+            {NAV_LINKS.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                onClick={() => setMobileOpen(false)}
+                onClick={() => {
+                  setMobileOpen(false);
+                  setMobileShopOpen(false);
+                }}
                 className="py-3 text-base font-medium text-brand-ink hover:text-brand-red border-b border-brand-line last:border-b-0"
               >
                 {link.label}

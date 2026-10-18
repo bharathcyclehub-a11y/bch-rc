@@ -73,9 +73,20 @@ export function ProductEditor({
 
   const catalogue = mode === "catalogue";
   const stockChanges = catalogue ? values.variants.filter((v, i) => v.stock !== initial.variants[i]?.stock) : [];
-  const overrideChanged = catalogue && (["priceInr", "mrpInr", "status", "badge"] as const).some((k) => changed.includes(k));
+  const CATALOGUE_OVERRIDE_KEYS = [
+    "priceInr",
+    "mrpInr",
+    "status",
+    "badge",
+    "discontinued",
+    "preorder",
+    "lowStockThreshold",
+    "featured",
+    "alternatives",
+  ] as const;
+  const overrideChanged = catalogue && CATALOGUE_OVERRIDE_KEYS.some((k) => changed.includes(k));
   const changeCount = catalogue
-    ? (["priceInr", "mrpInr", "status", "badge"] as const).filter((k) => changed.includes(k)).length + stockChanges.length
+    ? CATALOGUE_OVERRIDE_KEYS.filter((k) => changed.includes(k)).length + stockChanges.length
     : changed.length;
   const dirty = changeCount > 0;
   const bypassRef = useUnsavedChangesGuard(dirty && saving === null);
@@ -112,11 +123,17 @@ export function ProductEditor({
 
     setSaving(stay ? "continue" : "save");
     if (overrideChanged) {
+      const parsedThreshold = toInt(values.lowStockThreshold);
       const res = await saveProductOverride(productId, {
         priceInr: price === base.priceInr ? null : price,
         mrpInr: mrp === base.mrpInr ? null : mrp,
         visibility: values.status as "active" | "coming" | "hidden",
         badge: values.badge === (base.badge ?? "") ? null : values.badge,
+        discontinued: values.discontinued,
+        preorder: values.preorder,
+        lowStockThreshold: parsedThreshold,
+        featured: values.featured,
+        alternatives: values.alternatives,
       });
       if (!res.ok) {
         setSaving(null);

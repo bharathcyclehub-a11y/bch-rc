@@ -7,11 +7,13 @@ import {
   loadProductActivity,
   loadProductDetail,
   loadProductSales,
+  loadStockFailures,
   type ProductDetail,
 } from "@/lib/admin/catalog";
 import { permissionsFor } from "@/lib/admin/permissions";
 import { PRODUCT_STATUS_META } from "@/lib/admin/status";
 import { discountPct, formatDateShort, formatRelative, requestTime } from "@/lib/admin/format";
+import { getRestockDemandSummary } from "@/lib/restock";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { ButtonLink } from "@/components/admin/Button";
 import { ProductStatusBadge, Tag } from "@/components/admin/Badge";
@@ -28,11 +30,6 @@ import { ActivityTimeline } from "./_components/ActivityTimeline";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Product control centre: overview metrics (price, stock, 30-day paid sales),
- * variants with in-place stock adjustment, media, and the audit trail. Editing
- * content/pricing happens in /admin/products/[id]/edit.
- */
 export default async function ProductControlCentre({
   params,
   searchParams,
@@ -51,10 +48,18 @@ export default async function ProductControlCentre({
   const permissions = permissionsFor(ctx.role);
   const now = requestTime();
 
-  const [sales, activity] = await Promise.all([
+  const [sales, activity, restockSummary, stockFailures] = await Promise.all([
     product.source === "catalogue" ? loadProductSales(product.id, ctx.siteIds, 30) : Promise.resolve(null),
-    loadProductActivity(product, ctx.siteIds, tab === "activity" ? 50 : 6),
+    loadProductActivity(product, ctx.siteIds, tab === "activity" ? 50 : 8),
+    product.source === "catalogue"
+      ? getRestockDemandSummary().catch(() => ({ totalPending: 0, totalNotified: 0, bySkuVariant: [] }))
+      : Promise.resolve({ totalPending: 0, totalNotified: 0, bySkuVariant: [] }),
+    product.source === "catalogue" ? loadStockFailures(ctx.siteIds, product.id, 10) : Promise.resolve([]),
   ]);
+
+  const skuRestockRows = restockSummary.bySkuVariant.filter((r) => r.skuId === product.id);
+  const pendingRestockCount = skuRestockRows.reduce((s, r) => s + r.pendingCount, 0);
+  const notifiedRestockCount = skuRestockRows.reduce((s, r) => s + r.notifiedCount, 0);
 
   const base = `/admin/products/${encodeURIComponent(product.id)}`;
   const tabHref = (t: ProductTab) => (t === "overview" ? base : `${base}?tab=${t}`);
@@ -77,6 +82,9 @@ export default async function ProductControlCentre({
         badges={
           <>
             <ProductStatusBadge status={product.status} />
+            {product.discontinued && <Tag>Discontinued</Tag>}
+            {product.preorder && <Tag>Pre-order</Tag>}
+            {product.featured && <Tag>Featured</Tag>}
             {product.overridden && <Tag>Edited in admin</Tag>}
             {product.internal && <Tag>Internal</Tag>}
           </>
@@ -129,7 +137,19 @@ export default async function ProductControlCentre({
         ]}
       />
 
-      {tab === "overview" && <Overview product={product} sales={sales} activity={activity} now={now} canAdjust={permissions["inventory.adjust"]} activityHref={tabHref("activity")} />}
+      {tab === "overview" && (
+        <Overview
+          product={product}
+          sales={sales}
+          activity={activity}
+          now={now}
+          canAdjust={permissions["inventory.adjust"]}
+          activityHref={tabHref("activity")}
+          pendingRestockCount={pendingRestockCount}
+          notifiedRestockCount={notifiedRestockCount}
+          stockFailuresCount={stockFailures.length}
+        />
+      )}
 
       {(tab === "variants" || tab === "inventory") && (
         <div className="space-y-4">
@@ -138,7 +158,7 @@ export default async function ProductControlCentre({
               title={tab === "variants" ? "Variants" : liveStock ? "Stock by variant" : "Opening stock by variant"}
               description={
                 liveStock
-                  ? `Live from inventory · low-stock alert at ${product.lowThreshold} units`
+                  ? `Live from inventory · low-stock alert at ${product.lowThreshold} units · restocking > 0 triggers waiting alerts`
                   : "Planned stock — applied to inventory when the product is published"
               }
             />
@@ -151,13 +171,40 @@ export default async function ProductControlCentre({
               canAdjust={permissions["inventory.adjust"]}
             />
           </Panel>
+
+          {skuRestockRows.length > 0 && (
+            <Panel>
+              <PanelHeader
+                title="Back-in-stock subscriber demand"
+                description="Customers who opted in to receive an email or WhatsApp alert when this product returns to stock"
+              />
+              <div className="divide-y divide-admin-line px-4 py-2 text-sm">
+                {skuRestockRows.map((r) => (
+                  <div key={r.variantSlug} className="flex items-center justify-between py-2">
+                    <span className="font-medium text-brand-ink">
+                      Variant: <span className="font-mono">{r.variantSlug || "Default"}</span>
+                    </span>
+                    <span className="text-xs text-admin-muted">
+                      <b className="text-brand-ink">{r.pendingCount}</b> waiting · {r.notifiedCount} notified
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
+
           {tab === "inventory" && (
             <Panel>
-              <PanelHeader title="Stock history" />
+              <PanelHeader title="Stock & checkout history" />
               <ActivityTimeline
-                items={activity.filter((a) => a.title.startsWith("Stock"))}
+                items={activity.filter(
+                  (a) =>
+                    a.title.startsWith("Stock") ||
+                    a.title.startsWith("Checkout stock") ||
+                    a.title.startsWith("Restock"),
+                )}
                 now={now}
-                emptyText="Manual stock changes will be listed here."
+                emptyText="Manual stock changes, restock alerts and stock-related checkout failures will be listed here."
               />
             </Panel>
           )}
@@ -168,7 +215,7 @@ export default async function ProductControlCentre({
 
       {tab === "activity" && (
         <Panel>
-          <PanelHeader title="Activity" description="Price, status, badge and stock changes made in the admin" />
+          <PanelHeader title="Activity" description="Price, status, badge, stock changes and checkout stock events" />
           <ActivityTimeline items={activity} now={now} emptyText="Changes made in the admin will be listed here." />
         </Panel>
       )}
@@ -183,6 +230,9 @@ function Overview({
   now,
   canAdjust,
   activityHref,
+  pendingRestockCount,
+  notifiedRestockCount,
+  stockFailuresCount,
 }: {
   product: ProductDetail;
   sales: { units: number; revenue: number } | null;
@@ -190,6 +240,9 @@ function Overview({
   now: number;
   canAdjust: boolean;
   activityHref: string;
+  pendingRestockCount: number;
+  notifiedRestockCount: number;
+  stockFailuresCount: number;
 }) {
   const off = discountPct(product.mrpInr, product.priceInr);
   const live = product.stockKind === "live";
@@ -198,7 +251,7 @@ function Overview({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Metric
           label="Price"
           value={formatINR(product.priceInr)}
@@ -219,6 +272,16 @@ function Overview({
           label="Revenue · 30 days"
           value={sales ? formatINR(sales.revenue) : "—"}
           hint={product.source === "draft" ? "Not on sale yet" : "Paid orders only"}
+        />
+        <Metric
+          label="Restock demand"
+          value={`${pendingRestockCount} waiting`}
+          hint={
+            stockFailuresCount > 0
+              ? `${notifiedRestockCount} notified · ${stockFailuresCount} checkout OOS`
+              : `${notifiedRestockCount} notified on restock`
+          }
+          hintTone={stockFailuresCount > 0 ? "negative" : pendingRestockCount > 0 ? "attention" : undefined}
         />
       </div>
 
@@ -263,13 +326,21 @@ function Overview({
 
         <div className="min-w-0 space-y-4">
           <Panel>
-            <PanelHeader title="Details" />
+            <PanelHeader title="Details & Merchandising" />
             <KeyValue
               items={[
                 { label: "Category", value: product.categoryLabel },
                 { label: "Scale", value: product.scale },
                 { label: "Badge", value: product.badge ? <Tag>{product.badge}</Tag> : "None" },
                 { label: "Visibility", value: PRODUCT_STATUS_META[product.status].hint },
+                { label: "Pre-order", value: product.preorder ? <Tag>Enabled</Tag> : "Off" },
+                { label: "Discontinued", value: product.discontinued ? <Tag>Discontinued</Tag> : "No" },
+                { label: "Featured", value: product.featured ? <Tag>Featured</Tag> : "Standard" },
+                { label: "Low-stock alert", value: `≤ ${product.lowThreshold} units` },
+                {
+                  label: "Alternatives",
+                  value: product.alternatives.length > 0 ? product.alternatives.join(", ") : "Auto (by scale & category)",
+                },
                 { label: "Price source", value: priceSource },
                 ...(product.createdAt
                   ? [{ label: "Created", value: `${formatDateShort(product.createdAt, now)}${product.createdBy ? ` · ${product.createdBy.split("@")[0]}` : ""}` }]

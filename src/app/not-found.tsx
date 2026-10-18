@@ -54,7 +54,7 @@ export default function NotFound() {
             Back to store
           </Link>
           <Link
-            href="/#sku"
+            href="/#hub-shop"
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 border border-white/15 text-white px-6 py-4 rounded-full font-semibold text-base transition-colors min-w-[200px]"
           >
             <ShoppingBag size={18} />

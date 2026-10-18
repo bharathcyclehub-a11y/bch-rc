@@ -5,19 +5,12 @@ import Image from "next/image";
 import Link from "next/link";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useAutoRoll } from "./useAutoRoll";
+import { useLiveStock } from "@/lib/use-live-stock";
+import { getSkuBySlug } from "@/lib/products";
+import { resolveProductAvailability } from "@/lib/availability";
 
-/**
- * Hub — Best-sellers (section 7). A centered carousel: ONE poster on screen at a
- * time, in the middle of the section, with prev/next arrows (desktop) + dots.
- * Swipe on mobile; auto-rolls every 3.5 s like the hero (pauses on touch/hover,
- * off for reduced-motion). Each poster is self-contained art and the whole
- * slide links to that product's PDP, with a small red CTA pill overlaid.
- *
- * Mobile keeps the portrait 3:4 posters (best-64/16.webp). Desktop wants
- * landscape art via `imgDesktop` (own w/h); until then it falls back to the
- * portrait poster.
- */
 type Best = {
+  slug: string;
   imgMobile: string;
   imgDesktop: string | null;
   wDesktop: number;
@@ -29,8 +22,9 @@ type Best = {
 
 const BEST: Best[] = [
   {
+    slug: "pocket-monster",
     imgMobile: "/landing/best-64.webp",
-    imgDesktop: "/landing/best-64-desktop.webp", // landscape 3:2
+    imgDesktop: "/landing/best-64-desktop.webp",
     wDesktop: 1536,
     hDesktop: 1024,
     href: "/product/pocket-monster",
@@ -38,8 +32,9 @@ const BEST: Best[] = [
     cta: "Shop Monster Truck",
   },
   {
+    slug: "drift-inferno",
     imgMobile: "/landing/best-16.webp",
-    imgDesktop: "/landing/best-16-desktop.webp", // landscape 3:2
+    imgDesktop: "/landing/best-16-desktop.webp",
     wDesktop: 1536,
     hDesktop: 1024,
     href: "/product/drift-inferno",
@@ -51,8 +46,8 @@ const BEST: Best[] = [
 export default function HubBestSellers() {
   const railRef = useRef<HTMLDivElement>(null);
   const [idx, setIdx] = useState(0);
+  const { stockMap, overridesMap } = useLiveStock();
 
-  // Auto-rolls every 3.5 s (pauses on touch/hover, off for reduced-motion).
   useAutoRoll(railRef, BEST.length);
 
   const go = (i: number) => {
@@ -63,7 +58,6 @@ export default function HubBestSellers() {
     setIdx(n);
   };
 
-  // Keep the dots/arrows in sync when the rail is swiped directly.
   useEffect(() => {
     const rail = railRef.current;
     if (!rail) return;
@@ -81,28 +75,21 @@ export default function HubBestSellers() {
         <div className="mb-4 text-center sm:mb-10">
           <span className="font-mono text-[11px] uppercase tracking-[0.3em] text-brand-red">Best-sellers</span>
           <h2 id="hub-best" className="mt-12 font-display text-3xl font-extrabold uppercase tracking-wide text-brand-ink sm:mt-16 sm:text-4xl">
-            {/* Clean text for screen readers / SEO */}
             <span className="sr-only">The Most Drifted</span>
-            {/* Visual "correction": Loved scribbled out by hand, Drifted written above */}
             <span aria-hidden="true">
               The Most{" "}
               <span className="relative inline-block">
-                {/* Drifted — the hand-written correction above, slight tilt */}
                 <span className="absolute bottom-full left-1/2 mb-1 -translate-x-1/2 -rotate-3 whitespace-nowrap text-[0.78em] font-extrabold leading-none text-brand-red drop-shadow-sm">
                   Drifted
                 </span>
-                {/* Loved — crossed out with a hand-drawn double scribble */}
                 <span className="relative inline-block text-brand-ink">
                   Loved
-                  {/* Hand-scribbled cross-out — a thin zig-zag + wavy pass, so it
-                      clearly reads as scribbled by hand while the word stays legible. */}
                   <svg
                     aria-hidden
                     viewBox="0 0 240 48"
                     preserveAspectRatio="none"
                     className="pointer-events-none absolute left-[-8%] top-1/2 h-[1.35em] w-[116%] -translate-y-1/2 -rotate-1 overflow-visible text-brand-red"
                   >
-                    {/* back-and-forth zig-zag = the scribble */}
                     <path
                       d="M6,30 L48,17 L30,35 L92,19 L72,37 L138,20 L118,37 L188,19 L168,35 L234,22"
                       fill="none"
@@ -111,7 +98,6 @@ export default function HubBestSellers() {
                       strokeLinecap="round"
                       strokeLinejoin="round"
                     />
-                    {/* smooth wavy pass over it for a messier, hand-done feel */}
                     <path
                       d="M6,25 C64,34 120,15 180,29 C210,36 226,20 234,27"
                       fill="none"
@@ -127,48 +113,68 @@ export default function HubBestSellers() {
           </h2>
         </div>
 
-        {/* one poster at a time, centered */}
         <div className="relative mx-auto max-w-5xl">
           <div
             ref={railRef}
             className="no-scrollbar flex snap-x snap-mandatory overflow-x-auto overflow-y-hidden rounded-2xl"
           >
-            {BEST.map((b) => (
-              <div key={b.href} className="w-full flex-none snap-center">
-                <Link href={b.href} aria-label={b.alt} className="group relative block overflow-hidden">
-                  {/* mobile — portrait poster */}
-                  <Image
-                    src={b.imgMobile}
-                    alt={b.alt}
-                    width={1086}
-                    height={1448}
-                    sizes="(max-width: 640px) 100vw, 768px"
-                    className="h-auto w-full transition-transform duration-500 group-hover:scale-[1.02] sm:hidden"
-                  />
-                  {/* desktop — landscape art (falls back to the poster) */}
-                  <Image
-                    src={b.imgDesktop ?? b.imgMobile}
-                    alt=""
-                    aria-hidden
-                    width={b.wDesktop}
-                    height={b.hDesktop}
-                    sizes="768px"
-                    className="hidden h-auto w-full transition-transform duration-500 group-hover:scale-[1.02] sm:block"
-                  />
-                  <span className="absolute inset-x-0 bottom-4 flex justify-center">
-                    <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-brand-red px-6 py-2.5 text-sm font-bold text-white shadow-lg animate-heartbeat">
-                      {b.cta}
-                      <span aria-hidden className="transition-transform group-hover:translate-x-1">
-                        →
+            {BEST.map((b) => {
+              const sku = getSkuBySlug(b.slug);
+              const avail = sku && stockMap ? resolveProductAvailability(sku, stockMap, overridesMap?.[sku.id]) : null;
+              const isSoldOut = Boolean(avail && !avail.purchasable);
+
+              return (
+                <div key={b.href} className="w-full flex-none snap-center">
+                  <Link href={b.href} aria-label={b.alt} className="group relative block overflow-hidden">
+                    <Image
+                      src={b.imgMobile}
+                      alt={b.alt}
+                      width={1086}
+                      height={1448}
+                      sizes="(max-width: 640px) 100vw, 768px"
+                      className={`h-auto w-full transition-transform duration-500 group-hover:scale-[1.02] sm:hidden ${
+                        isSoldOut ? "opacity-80 saturate-50" : ""
+                      }`}
+                    />
+                    <Image
+                      src={b.imgDesktop ?? b.imgMobile}
+                      alt=""
+                      aria-hidden
+                      width={b.wDesktop}
+                      height={b.hDesktop}
+                      sizes="768px"
+                      className={`hidden h-auto w-full transition-transform duration-500 group-hover:scale-[1.02] sm:block ${
+                        isSoldOut ? "opacity-80 saturate-50" : ""
+                      }`}
+                    />
+                    {avail && avail.status === "LOW_STOCK" && (
+                      <span className="absolute right-4 top-4 rounded-full bg-amber-500 px-3 py-1 text-xs font-extrabold uppercase tracking-wider text-zinc-950 shadow">
+                        {avail.label}
+                      </span>
+                    )}
+                    {isSoldOut && (
+                      <span className="absolute right-4 top-4 rounded-full bg-red-600 px-3 py-1 text-xs font-extrabold uppercase tracking-wider text-white shadow">
+                        Sold Out
+                      </span>
+                    )}
+                    <span className="absolute inset-x-0 bottom-4 flex justify-center">
+                      <span
+                        className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-6 py-2.5 text-sm font-bold text-white shadow-lg ${
+                          isSoldOut ? "bg-zinc-900/90" : "bg-brand-red animate-heartbeat"
+                        }`}
+                      >
+                        {isSoldOut ? `${b.cta} (View Alternatives)` : b.cta}
+                        <span aria-hidden className="transition-transform group-hover:translate-x-1">
+                          →
+                        </span>
                       </span>
                     </span>
-                  </span>
-                </Link>
-              </div>
-            ))}
+                  </Link>
+                </div>
+              );
+            })}
           </div>
 
-          {/* arrows — desktop */}
           <button
             type="button"
             onClick={() => go(idx - 1)}
@@ -187,7 +193,6 @@ export default function HubBestSellers() {
           </button>
         </div>
 
-        {/* dots */}
         <div className="mt-5 flex justify-center gap-2">
           {BEST.map((b, i) => (
             <button

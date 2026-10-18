@@ -40,6 +40,10 @@ export type EditorValues = {
   trackInventory: boolean;
   lowStockThreshold: string;
   status: ProductStatus;
+  discontinued: boolean;
+  preorder: boolean;
+  featured: boolean;
+  alternatives: string[];
   variants: EditorVariant[];
 };
 
@@ -66,6 +70,10 @@ export function toEditorValues(p: ProductDetail): EditorValues {
     trackInventory: p.trackInventory,
     lowStockThreshold: String(p.lowThreshold),
     status: p.status,
+    discontinued: p.discontinued,
+    preorder: p.preorder,
+    featured: p.featured,
+    alternatives: p.alternatives,
     variants: p.variants.map((v, i) => ({
       key: `v${i}-${v.slug}`,
       name: v.name,
@@ -97,6 +105,10 @@ export function emptyEditorValues(category: string): EditorValues {
     trackInventory: true,
     lowStockThreshold: "5",
     status: "draft",
+    discontinued: false,
+    preorder: false,
+    featured: false,
+    alternatives: [],
     variants: [],
   };
 }

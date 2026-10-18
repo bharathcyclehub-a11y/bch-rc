@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { PRODUCTS, type Sku } from "./products";
 import { OFFERS } from "./config";
+import { applyOverride, type ProductOverride } from "./availability";
 
 export type CartItem = {
   skuId: string;
@@ -15,30 +16,47 @@ export type CartItem = {
 type CartState = {
   items: CartItem[];
   isOpen: boolean;
-  /** True once zustand has rehydrated from localStorage on the client. Stays
-   *  false during SSR + first client render so cart-derived UI (badge, count,
-   *  empty-cart redirect) doesn't flash or mismatch before the saved cart loads. */
+  /** True once zustand has rehydrated from localStorage on the client. */
   hasHydrated: boolean;
   setHasHydrated: (v: boolean) => void;
-  add: (skuId: string, variantSlug: string | null, qty?: number) => void;
+  add: (
+    skuId: string,
+    variantSlug: string | null,
+    qty?: number,
+    maxQty?: number,
+  ) => void;
   remove: (skuId: string, variantSlug: string | null) => void;
-  setQty: (skuId: string, variantSlug: string | null, qty: number) => void;
+  setQty: (
+    skuId: string,
+    variantSlug: string | null,
+    qty: number,
+    maxQty?: number,
+  ) => void;
+  replaceItem: (
+    oldSkuId: string,
+    oldVariantSlug: string | null,
+    newSkuId: string,
+    newVariantSlug: string | null,
+    qty?: number,
+  ) => void;
   clear: () => void;
   open: () => void;
   close: () => void;
   toggle: () => void;
 };
 
-function sameLine(a: CartItem, skuId: string, variantSlug: string | null): boolean {
+function sameLine(
+  a: CartItem,
+  skuId: string,
+  variantSlug: string | null,
+): boolean {
   return a.skuId === skuId && (a.variantSlug ?? null) === (variantSlug ?? null);
 }
 
 /**
  * Cart store factory. The 1:64 store and the 1:16 store each get their OWN
  * isolated cart (separate localStorage key, separate zustand instance) so a
- * customer's pocket-car cart and big-car cart never merge. Both resolve line
- * items against the same PRODUCTS catalog and feed the identical /api/orders
- * pipeline downstream — only the cart contents are kept apart.
+ * customer's pocket-car cart and big-car cart never merge.
  */
 function createCartStore(persistName: string) {
   return create<CartState>()(
@@ -48,19 +66,26 @@ function createCartStore(persistName: string) {
         isOpen: false,
         hasHydrated: false,
         setHasHydrated: (v) => set({ hasHydrated: v }),
-        add: (skuId, variantSlug, qty = 1) =>
+        add: (skuId, variantSlug, qty = 1, maxQty = 10) =>
           set((s) => {
-            const existing = s.items.find((i) => sameLine(i, skuId, variantSlug));
+            const cap = Math.max(1, Math.min(10, maxQty));
+            const existing = s.items.find((i) =>
+              sameLine(i, skuId, variantSlug),
+            );
             if (existing) {
+              const nextQty = Math.min(cap, existing.qty + qty);
               return {
                 items: s.items.map((i) =>
-                  sameLine(i, skuId, variantSlug) ? { ...i, qty: i.qty + qty } : i,
+                  sameLine(i, skuId, variantSlug) ? { ...i, qty: nextQty } : i,
                 ),
                 isOpen: true,
               };
             }
             return {
-              items: [...s.items, { skuId, variantSlug, qty }],
+              items: [
+                ...s.items,
+                { skuId, variantSlug, qty: Math.min(cap, Math.max(1, qty)) },
+              ],
               isOpen: true,
             };
           }),
@@ -68,22 +93,60 @@ function createCartStore(persistName: string) {
           set((s) => ({
             items: s.items.filter((i) => !sameLine(i, skuId, variantSlug)),
           })),
-        setQty: (skuId, variantSlug, qty) =>
-          set((s) => ({
-            items:
-              qty <= 0
-                ? s.items.filter((i) => !sameLine(i, skuId, variantSlug))
-                : s.items.map((i) =>
-                    sameLine(i, skuId, variantSlug) ? { ...i, qty } : i,
-                  ),
-          })),
+        setQty: (skuId, variantSlug, qty, maxQty = 10) =>
+          set((s) => {
+            const cap = Math.max(1, Math.min(10, maxQty));
+            return {
+              items:
+                qty <= 0
+                  ? s.items.filter((i) => !sameLine(i, skuId, variantSlug))
+                  : s.items.map((i) =>
+                      sameLine(i, skuId, variantSlug)
+                        ? { ...i, qty: Math.min(cap, qty) }
+                        : i,
+                    ),
+            };
+          }),
+        replaceItem: (
+          oldSkuId,
+          oldVariantSlug,
+          newSkuId,
+          newVariantSlug,
+          qty = 1,
+        ) =>
+          set((s) => {
+            const withoutOld = s.items.filter(
+              (i) => !sameLine(i, oldSkuId, oldVariantSlug),
+            );
+            const existingNew = withoutOld.find((i) =>
+              sameLine(i, newSkuId, newVariantSlug),
+            );
+            if (existingNew) {
+              return {
+                items: withoutOld.map((i) =>
+                  sameLine(i, newSkuId, newVariantSlug)
+                    ? { ...i, qty: Math.min(10, i.qty + qty) }
+                    : i,
+                ),
+              };
+            }
+            return {
+              items: [
+                ...withoutOld,
+                {
+                  skuId: newSkuId,
+                  variantSlug: newVariantSlug,
+                  qty: Math.max(1, Math.min(10, qty)),
+                },
+              ],
+            };
+          }),
         clear: () => set({ items: [] }),
         open: () => set({ isOpen: true }),
         close: () => set({ isOpen: false }),
         toggle: () => set((s) => ({ isOpen: !s.isOpen })),
       }),
       {
-        // v2: variantSlug added. Older v1 carts are discarded by migrate().
         name: persistName,
         version: 2,
         storage: createJSONStorage(() => localStorage),
@@ -94,8 +157,6 @@ function createCartStore(persistName: string) {
           }
           return _state as Partial<CartState>;
         },
-        // Fires after rehydration (even when there's nothing stored) — flip the
-        // flag so the UI knows the real cart is now loaded.
         onRehydrateStorage: () => (state) => {
           state?.setHasHydrated(true);
         },
@@ -120,11 +181,17 @@ export type CartLine = {
   lineTotalINR: number;
 };
 
-export function getCartLines(items: CartItem[]): CartLine[] {
+export function getCartLines(
+  items: CartItem[],
+  overrideMap?: Record<string, ProductOverride>,
+): CartLine[] {
   return items
     .map((i) => {
-      const sku = PRODUCTS.find((p) => p.id === i.skuId);
-      if (!sku) return null;
+      const baseSku = PRODUCTS.find((p) => p.id === i.skuId);
+      if (!baseSku) return null;
+      const sku = overrideMap
+        ? applyOverride(baseSku, overrideMap[i.skuId])
+        : baseSku;
       const variant = i.variantSlug
         ? sku.colors?.find((c) => c.slug === i.variantSlug) ?? null
         : null;
@@ -142,8 +209,14 @@ export function getCartLines(items: CartItem[]): CartLine[] {
     .filter((l): l is CartLine => l !== null);
 }
 
-export function getCartSubtotal(items: CartItem[]): number {
-  return getCartLines(items).reduce((sum, l) => sum + l.lineTotalINR, 0);
+export function getCartSubtotal(
+  items: CartItem[],
+  overrideMap?: Record<string, ProductOverride>,
+): number {
+  return getCartLines(items, overrideMap).reduce(
+    (sum, l) => sum + l.lineTotalINR,
+    0,
+  );
 }
 
 export function getCartCount(items: CartItem[]): number {

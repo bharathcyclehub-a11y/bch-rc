@@ -79,9 +79,21 @@ export type Sku = {
    *  no buy) but EXCLUDED from the live 1:64/1:16 storefronts, PDPs, sitemap and
    *  checkout. Set on products whose price/stock isn't live yet. */
   comingSoon?: boolean;
+  /** Discontinued product: navigable for SEO/old links, purchase disabled, shows replacements. */
+  discontinued?: boolean;
+  /** Preorder explicitly enabled by admin. */
+  preorder?: boolean;
+  /** Per-SKU low stock threshold (falls back to global LOW_STOCK_THRESHOLD). */
+  lowStockThreshold?: number;
+  /** Admin merchandising pin for featured status. */
+  featured?: boolean;
+  /** Explicit replacement/alternative SKU IDs when sold out or discontinued. */
+  alternatives?: string[];
   /** Fixed-price bundle SKU (e.g. the Construction 3-Pack). Purchasable, but
    *  EXCLUDED from the normal product grid — surfaced via its own CTA banner. */
   bundle?: boolean;
+  /** Component SKU IDs for fixed-price bundles (must all be in stock to purchase). */
+  bundleComponentSkuIds?: string[];
   /** Legacy fixed spec sheet. Every field is optional so a product only states
    *  what has been verified — a missing field is omitted, never guessed. */
   specs: {
@@ -1120,6 +1132,7 @@ export const PRODUCTS: Sku[] = [
     // construction rigs. Priced as its own product so checkout/receipts hit the
     // exact ₹4,999 (the % ladder can't land on that number). Ships as all 3.
     id: "construction-3pack", slug: "construction-3pack", scale: "1:64", category: "construction", bundle: true,
+    bundleComponentSkuIds: ["mining-truck", "rc-excavator", "rc-forklift"],
     name: "Construction 3-Pack", tagline: "Mining Truck + Excavator + Forklift — all three, one price",
     retailINR: 4999, mrpINR: 6297,
     bullets: ["Heavy Duty Mining Truck included", "Mini RC Excavator included", "Mini RC Forklift included", "Save ~₹1,300 vs buying all three separately"],
@@ -1376,8 +1389,16 @@ export const PRODUCTS: Sku[] = [
 
 export const HERO_SKU_ID = "pocket-porsche";
 
+export const ALL_SKUS: Sku[] = PRODUCTS.filter((p) => !p.hidden && !p.internal);
+
 export function getProductById(id: string): Sku | undefined {
   return PRODUCTS.find((p) => p.id === id);
+}
+
+export const getSkuById = getProductById;
+
+export function getSkuBySlug(slug: string): Sku | undefined {
+  return PRODUCTS.find((p) => p.slug === slug);
 }
 
 /** Explicit display order for the storefront grid, by SKU id. Anything not
@@ -1500,11 +1521,21 @@ export function totalStock(sku: Sku): number {
 
 /**
  * Default variant slug for quick-add CTAs (Hero, FinalCta, sticky bars, bundle).
- * Picks the first IN-STOCK color, falls back to the first color, falls back
- * to null for SKUs without colors. The PDP color picker can always override.
+ * Picks the first IN-STOCK color from live stockMap when provided (or seed stock
+ * as fallback), falls back to the first color, falls back to null for SKUs
+ * without colors. The PDP color picker can always override.
  */
-export function defaultVariantSlug(sku: Sku): string | null {
+export function defaultVariantSlug(
+  sku: Sku,
+  stockMap?: Record<string, number> | null,
+): string | null {
   if (!sku.colors?.length) return null;
+  if (stockMap) {
+    return (
+      sku.colors.find((c) => (stockMap[`${sku.id}:${c.slug}`] ?? 0) > 0)?.slug ??
+      sku.colors[0].slug
+    );
+  }
   return sku.colors.find((c) => c.stock > 0)?.slug ?? sku.colors[0].slug;
 }
 

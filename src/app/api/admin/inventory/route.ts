@@ -1,5 +1,5 @@
 /**
- * POST /api/admin/inventory  (admin-gated)
+ * POST /api/admin/inventory  (admin-gated + site-permission checked)
  *
  * Manual stock control from the admin dashboard:
  *  - mode "set":    absolute restock / starting stock (value >= 0). Upserts the
@@ -9,18 +9,20 @@
  *                   arrives, -2 to write off damaged units).
  *
  * Every change writes an `events` audit row (source="admin") with before/after
- * and the operator's email, so manual moves are distinguishable from the
- * order-driven decrement/restore path. Variants are validated against the
- * catalog (products.ts) so typos can't create junk rows.
+ * and the operator's email, revalidates storefront paths, and triggers
+ * back-in-stock alerts when a variant transitions from <= 0 to > 0 stock.
  */
 
 import { NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { inventory, events } from "@/db/schema";
 import { getAdminContext } from "@/lib/admin-auth";
 import { expectedInventoryKeys, siteIdForSku } from "@/lib/inventory";
+import { PRODUCTS } from "@/lib/products";
+import { triggerRestockAlertsForVariant } from "@/lib/restock";
 import { logError } from "@/lib/logger";
 
 const Body = z.object({
@@ -50,9 +52,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Stock can't be negative" }, { status: 400 });
   }
 
-  // Only let admins manage variants that actually exist in the catalogue —
-  // this is also the "new product variant" path: a catalog variant with no
-  // inventory row yet is a valid key, and `set` creates the row.
   const known = expectedInventoryKeys().some(
     (k) => k.skuId === body.skuId && k.variantSlug === body.variantSlug,
   );
@@ -65,9 +64,13 @@ export async function POST(req: Request) {
     );
   }
 
-  // A SKU's inventory lives under its store (1:16 → prc16, else prc), so every
-  // read/write/audit below targets the resolved site, not a hardcoded one.
   const siteId = siteIdForSku(body.skuId);
+  if (!ctx.siteIds.includes(siteId)) {
+    return NextResponse.json(
+      { error: "Forbidden — you do not have permission for this site's inventory" },
+      { status: 403 },
+    );
+  }
 
   try {
     const result = await db.transaction(async (tx) => {
@@ -112,7 +115,6 @@ export async function POST(req: Request) {
           })
           .onConflictDoUpdate({
             target,
-            // GREATEST clamps at 0 so an over-large decrement can't go negative.
             set: {
               stock: sql`GREATEST(0, ${inventory.stock} + ${body.value})`,
               updatedAt: new Date(),
@@ -140,7 +142,33 @@ export async function POST(req: Request) {
       return { before, after };
     });
 
-    return NextResponse.json({ ok: true, ...result });
+    // Revalidate storefront & admin caches
+    const sku = PRODUCTS.find((p) => p.id === body.skuId);
+    revalidatePath("/");
+    revalidatePath("/16");
+    if (sku) {
+      revalidatePath(`/product/${sku.slug}`);
+      revalidatePath(`/admin/products/${sku.id}`);
+    }
+    revalidatePath("/admin/products");
+    revalidatePath("/admin/inventory");
+
+    // Trigger opt-in back-in-stock notifications when verified stock transitions <= 0 -> > 0
+    let restockAlerts = { triggered: false, sentCount: 0, queuedWithoutProviderCount: 0 };
+    if ((result.before ?? 0) <= 0 && result.after > 0) {
+      restockAlerts = await triggerRestockAlertsForVariant({
+        skuId: body.skuId,
+        variantSlug: body.variantSlug,
+        beforeStock: result.before,
+        afterStock: result.after,
+      });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      ...result,
+      restockAlerts,
+    });
   } catch (err) {
     logError("api:admin:inventory", err, { skuId: body.skuId, variantSlug: body.variantSlug });
     return NextResponse.json({ error: "Failed to update stock" }, { status: 500 });
