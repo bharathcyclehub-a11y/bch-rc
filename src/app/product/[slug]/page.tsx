@@ -1,13 +1,30 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
-import { PRODUCTS, getVisibleProducts, type Sku } from "@/lib/products";
-import { getOverrideForSku, applyOverride } from "@/lib/product-overrides";
+import { ChevronRight } from "lucide-react";
+import { PRODUCTS, type Sku } from "@/lib/products";
+import {
+  getOverrideForSku,
+  applyOverride,
+  type ProductOverride,
+} from "@/lib/product-overrides";
+import { getStockMap } from "@/lib/inventory";
+import {
+  resolveProductAvailability,
+  resolveVariantAvailability,
+} from "@/lib/availability";
+import {
+  PRIMARY_CATEGORIES,
+  getAllIndexableSkus,
+  getPrimaryCategoryForSku,
+  getProductClassification,
+} from "@/lib/categories";
 import { AnnouncementBar } from "@/components/AnnouncementBar";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import PdpFloatingUi from "@/components/PdpFloatingUi";
 import PDPClient from "@/components/PDPClient";
 import { THEME } from "@/lib/theme";
-import { OFFERS, TRUST } from "@/lib/config";
+import { OFFERS } from "@/lib/config";
 import {
   getApprovedReviewsForSku,
   getReviewAggregateForSku,
@@ -17,13 +34,104 @@ import {
 /** Single hub store: all reviews are keyed under the one site id. */
 const REVIEWS_SITE_ID = "prc";
 
-/** Build a Google-readable schema.org @graph blob for a SKU.
- *  Combines Product + BreadcrumbList in one script tag — Google parses both. */
-function productJsonLd(sku: Sku, agg: ReviewAggregate) {
+function schemaAvailabilityUrl(status: string): string {
+  switch (status) {
+    case "IN_STOCK":
+    case "LOW_STOCK":
+      return "https://schema.org/InStock";
+    case "PREORDER":
+      return "https://schema.org/PreOrder";
+    case "COMING_SOON":
+      return "https://schema.org/PreSale";
+    case "DISCONTINUED":
+      return "https://schema.org/Discontinued";
+    case "OUT_OF_STOCK":
+    default:
+      return "https://schema.org/OutOfStock";
+  }
+}
+
+function productJsonLd(
+  sku: Sku,
+  agg: ReviewAggregate,
+  availabilityStatus: string,
+  liveStock: Record<string, number> | null,
+  override?: ProductOverride,
+) {
   const url = `https://${THEME.domain}/product/${sku.slug}`;
+  const primaryCat = getPrimaryCategoryForSku(sku);
+  const cls = getProductClassification(sku);
+  const onlinePrice = Math.max(0, sku.retailINR - OFFERS.prepaidDiscountINR);
   const images = [sku.heroImage, ...sku.altImages]
     .filter(Boolean)
     .map((p) => `https://${THEME.domain}${p}`);
+
+  const returnPolicy = {
+    "@type": "MerchantReturnPolicy",
+    applicableCountry: "IN",
+    returnPolicyCategory: "https://schema.org/MerchantReturnFiniteReturnWindow",
+    merchantReturnDays: 7,
+    returnMethod: "https://schema.org/ReturnByMail",
+    returnFees: "https://schema.org/FreeReturn",
+  };
+
+  const shippingDetails = {
+    "@type": "OfferShippingDetails",
+    shippingDestination: { "@type": "DefinedRegion", addressCountry: "IN" },
+    shippingRate: {
+      "@type": "MonetaryAmount",
+      value: "0",
+      currency: "INR",
+    },
+    deliveryTime: {
+      "@type": "ShippingDeliveryTime",
+      handlingTime: {
+        "@type": "QuantitativeValue",
+        minValue: 0,
+        maxValue: 1,
+        unitCode: "DAY",
+      },
+      transitTime: {
+        "@type": "QuantitativeValue",
+        minValue: 2,
+        maxValue: 7,
+        unitCode: "DAY",
+      },
+    },
+  };
+
+  const hasVariants = Boolean(sku.colors && sku.colors.length > 0);
+  const variants = hasVariants
+    ? sku.colors!.map((c) => {
+        const varAvail = resolveVariantAvailability(
+          sku,
+          c.slug,
+          liveStock,
+          override,
+        );
+        return {
+          "@type": "Product",
+          "@id": `${url}#variant-${c.slug}`,
+          name: `${sku.name} — ${c.name}`,
+          sku: `${sku.id}-${c.slug}`,
+          color: c.name,
+          image: `https://${THEME.domain}${c.image}`,
+          brand: { "@type": "Brand", name: THEME.brandName },
+          offers: {
+            "@type": "Offer",
+            url: `${url}?color=${c.slug}`,
+            priceCurrency: "INR",
+            price: onlinePrice.toString(),
+            availability: schemaAvailabilityUrl(varAvail.status),
+            itemCondition: "https://schema.org/NewCondition",
+            priceValidUntil: "2027-12-31",
+            seller: { "@type": "Organization", name: THEME.legal.tradeName },
+            hasMerchantReturnPolicy: returnPolicy,
+            shippingDetails,
+          },
+        };
+      })
+    : undefined;
 
   const product = {
     "@type": "Product",
@@ -33,10 +141,17 @@ function productJsonLd(sku: Sku, agg: ReviewAggregate) {
     sku: sku.id,
     mpn: sku.id,
     image: images,
-    category: "Toys & Games > Remote Control Cars",
+    category: primaryCat.name,
+    color: sku.colors?.length
+      ? sku.colors.map((c) => c.name).join(" / ")
+      : cls?.colorNames.join(" / "),
     brand: { "@type": "Brand", name: THEME.brandName },
-    // Only publish AggregateRating when real approved reviews exist — Google
-    // penalizes rating markup that isn't backed by on-page reviews.
+    ...(hasVariants
+      ? {
+          inProductGroupWithID: sku.id,
+          hasVariant: variants,
+        }
+      : {}),
     ...(agg.count > 0
       ? {
           aggregateRating: {
@@ -51,45 +166,19 @@ function productJsonLd(sku: Sku, agg: ReviewAggregate) {
     offers: {
       "@type": "Offer",
       priceCurrency: "INR",
-      // Real online price = retailINR - prepaid bonus. Google was surfacing
-      // the higher pre-bonus sticker (e.g. ₹1,099 instead of ₹999), so customers
-      // arriving from search saw a higher number than they'd actually pay.
-      // We also publish the higher sticker as priceSpecification.maxPrice so
-      // Google can render both ("₹999 - ₹1,099") on rich results when COD is
-      // the chosen method.
-      price: Math.max(0, sku.retailINR - OFFERS.prepaidDiscountINR).toString(),
+      price: onlinePrice.toString(),
       url,
       priceSpecification: {
         "@type": "PriceSpecification",
         priceCurrency: "INR",
         price: sku.retailINR.toString(),
       },
-      availability: "https://schema.org/InStock",
+      availability: schemaAvailabilityUrl(availabilityStatus),
       itemCondition: "https://schema.org/NewCondition",
       priceValidUntil: "2027-12-31",
       seller: { "@type": "Organization", name: THEME.legal.tradeName },
-      hasMerchantReturnPolicy: {
-        "@type": "MerchantReturnPolicy",
-        applicableCountry: "IN",
-        returnPolicyCategory: "https://schema.org/MerchantReturnFiniteReturnWindow",
-        merchantReturnDays: 7,
-        returnMethod: "https://schema.org/ReturnByMail",
-        returnFees: "https://schema.org/FreeReturn",
-      },
-      shippingDetails: {
-        "@type": "OfferShippingDetails",
-        shippingDestination: { "@type": "DefinedRegion", addressCountry: "IN" },
-        shippingRate: {
-          "@type": "MonetaryAmount",
-          value: "0",
-          currency: "INR",
-        },
-        deliveryTime: {
-          "@type": "ShippingDeliveryTime",
-          handlingTime: { "@type": "QuantitativeValue", minValue: 0, maxValue: 1, unitCode: "DAY" },
-          transitTime: { "@type": "QuantitativeValue", minValue: 2, maxValue: 7, unitCode: "DAY" },
-        },
-      },
+      hasMerchantReturnPolicy: returnPolicy,
+      shippingDetails,
     },
   };
 
@@ -97,9 +186,25 @@ function productJsonLd(sku: Sku, agg: ReviewAggregate) {
     "@type": "BreadcrumbList",
     "@id": `${url}#crumbs`,
     itemListElement: [
-      { "@type": "ListItem", position: 1, name: "Home", item: `https://${THEME.domain}/` },
-      { "@type": "ListItem", position: 2, name: "Shop", item: `https://${THEME.domain}/#sku` },
-      { "@type": "ListItem", position: 3, name: sku.name, item: url },
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "Home",
+        item: `https://${THEME.domain}/`,
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: "Collections",
+        item: `https://${THEME.domain}/collections`,
+      },
+      {
+        "@type": "ListItem",
+        position: 3,
+        name: primaryCat.name,
+        item: `https://${THEME.domain}${primaryCat.url}`,
+      },
+      { "@type": "ListItem", position: 4, name: sku.name, item: url },
     ],
   };
 
@@ -110,9 +215,14 @@ function productJsonLd(sku: Sku, agg: ReviewAggregate) {
 }
 
 export function generateStaticParams() {
-  // Only prerender visible SKUs. Hidden SKUs hit notFound() at runtime if anyone
-  // navigates directly to their URL.
-  return getVisibleProducts().map((p) => ({ slug: p.slug }));
+  return getAllIndexableSkus().map((p) => ({ slug: p.slug }));
+}
+
+function withSsrTimeout<T>(promise: Promise<T>, fallback: T, ms = 2500): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
 }
 
 export async function generateMetadata({
@@ -121,39 +231,69 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const sku = PRODUCTS.find((p) => p.slug === slug);
-  if (!sku || sku.hidden || sku.internal) return { title: "Not Found" };
-  // Coming-soon SKUs are public hub teasers without a price yet: keep the name,
-  // never a placeholder price. (No DB lookup here — metadata stays query-free.)
-  if (sku.comingSoon) return { title: sku.name };
+  const base = PRODUCTS.find((p) => p.slug === slug);
+  if (!base || base.id === "samtop-camera") {
+    return { title: "Not Found", robots: { index: false, follow: false } };
+  }
 
-  const url = `/product/${sku.slug}`;
-  const fullDescription =
-    `${sku.tagline}. ${sku.bullets[0]}. ${sku.bullets[1]}. ` +
-    `₹${sku.retailINR} · Pan-India COD · ships 24 hrs from Bangalore.`;
+  const override = await withSsrTimeout(
+    getOverrideForSku(base.id),
+    undefined,
+    1500,
+  );
+  const sku = applyOverride(base, override);
+  if (sku.hidden) {
+    return { title: "Not Found", robots: { index: false, follow: false } };
+  }
+  if (sku.internal) {
+    return {
+      title: `${sku.name} | Pocket RC Cars`,
+      robots: { index: false, follow: false },
+    };
+  }
+  if (sku.comingSoon) {
+    return {
+      title: `${sku.name} — Coming Soon`,
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const cls = getProductClassification(sku);
+  const canonicalUrl = `https://${THEME.domain}/product/${sku.slug}`;
+  const seoTitle =
+    cls?.seoTitle ?? `${sku.name} (${sku.scale}) — ₹${sku.retailINR} | Pocket RC Cars`;
+  const seoDescription =
+    cls?.seoDescription ??
+    `${sku.tagline}. ${sku.bullets[0] ?? ""} ₹${sku.retailINR} · Pan-India COD · ships 24 hrs from Bangalore.`.slice(
+      0,
+      158,
+    );
+  const primaryAlt = cls?.primaryImageAlt ?? `${sku.name} — ${sku.bodyShape}`;
 
   return {
-    title: `${sku.name} (${sku.scale}) — ₹${sku.retailINR}`,
-    description: fullDescription.slice(0, 158),
-    alternates: { canonical: url },
+    title: { absolute: seoTitle },
+    description: seoDescription,
+    alternates: { canonical: canonicalUrl },
     openGraph: {
-      title: `${sku.name} (${sku.scale}) · ₹${sku.retailINR}`,
-      description: fullDescription.slice(0, 158),
-      url,
+      title: seoTitle,
+      description: seoDescription,
+      url: canonicalUrl,
+      siteName: THEME.brandName,
+      locale: "en_IN",
       type: "website",
       images: [
         {
           url: sku.heroImage,
           width: 1200,
           height: 630,
-          alt: `${sku.name} — ${sku.bodyShape}`,
+          alt: primaryAlt,
         },
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title: `${sku.name} (${sku.scale}) · ₹${sku.retailINR}`,
-      description: fullDescription.slice(0, 158),
+      title: seoTitle,
+      description: seoDescription,
       images: [sku.heroImage],
     },
   };
@@ -166,24 +306,31 @@ export default async function ProductPage({
 }) {
   const { slug } = await params;
   const base = PRODUCTS.find((p) => p.slug === slug);
-  if (!base) notFound();
-  // Layer admin overrides (price / visibility / badge) over the code SKU so the
-  // PDP shows exactly the price the checkout will charge.
-  const sku = applyOverride(base, await getOverrideForSku(base.id));
-  // 404 hidden SKUs AND internal SKUs (e.g. qa-1rs). Internal SKUs need to
-  // exist in the data for admin tooling (manual orders, inventory) but must
-  // not be reachable as PDPs - otherwise a stranger who guesses the slug
-  // can place a ₹1 COD order that burns ₹180-240 in two-way RTO logistics.
-  if (sku.hidden || sku.internal || sku.comingSoon) notFound();
+  if (!base || base.id === "samtop-camera") notFound();
 
-  // Reviews are keyed under the single hub site. Fetch aggregate +
-  // approved list on the server so the PDP ships with real ratings + JSON-LD.
   const siteId = REVIEWS_SITE_ID;
-  const [agg, reviewRows] = await Promise.all([
-    getReviewAggregateForSku(siteId, sku.id),
-    getApprovedReviewsForSku(siteId, sku.id, 30),
+  const emptyAgg: ReviewAggregate = {
+    count: 0,
+    averageRating: 0,
+    histogram: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+  };
+
+  const [override, agg, reviewRows, liveStock] = await Promise.all([
+    withSsrTimeout(getOverrideForSku(base.id), undefined),
+    withSsrTimeout(getReviewAggregateForSku(siteId, base.id), emptyAgg),
+    withSsrTimeout(getApprovedReviewsForSku(siteId, base.id, 30), []),
+    withSsrTimeout(
+      getStockMap([base.id, ...(base.bundleComponentSkuIds ?? [])]),
+      null,
+    ),
   ]);
-  // Serialize Date → ISO string across the server/client boundary.
+
+  const sku = applyOverride(base, override);
+  if (sku.hidden) notFound();
+
+  const avail = resolveProductAvailability(sku, liveStock, override);
+  const primaryCat = getPrimaryCategoryForSku(sku);
+
   const reviews = reviewRows.map((r) => ({
     ...r,
     createdAt: r.createdAt.toISOString(),
@@ -191,25 +338,97 @@ export default async function ProductPage({
 
   return (
     <>
-      {/* schema.org Product + BreadcrumbList @graph — Google rich results,
-          price in search, OpenGraph product cards on link previews.
-          `<` is escaped so any future bullet/tagline containing `</script>`
-          can't break out of the script tag. */}
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
-          __html: JSON.stringify(productJsonLd(sku, agg)).replace(/</g, "\\u003c"),
+          __html: JSON.stringify(
+            productJsonLd(sku, agg, avail.status, liveStock, override),
+          ).replace(/</g, "\\u003c"),
         }}
       />
       <AnnouncementBar />
       <Header />
       <main className="flex-1 bg-white">
+        {/* Visible SEO Breadcrumb Bar linking back to Primary Collection */}
+        <nav
+          aria-label="Breadcrumb"
+          className="border-b border-brand-line bg-brand-cream/60"
+        >
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-1.5 px-4 py-2.5 text-xs text-brand-ink-soft">
+            <Link href="/" className="transition hover:text-brand-red">
+              Home
+            </Link>
+            <ChevronRight size={12} className="text-brand-ink-soft/50" />
+            <Link href="/collections" className="transition hover:text-brand-red">
+              Collections
+            </Link>
+            <ChevronRight size={12} className="text-brand-ink-soft/50" />
+            <Link
+              href={primaryCat.url}
+              className="font-semibold text-brand-ink transition hover:text-brand-red"
+            >
+              {primaryCat.name}
+            </Link>
+            <ChevronRight size={12} className="text-brand-ink-soft/50" />
+            <span
+              className="truncate font-semibold text-brand-red"
+              aria-current="page"
+            >
+              {sku.name}
+            </span>
+          </div>
+        </nav>
+
         <PDPClient
           sku={sku}
           siteId={siteId}
           reviews={reviews}
           reviewData={agg}
+          initialStockMap={liveStock}
         />
+
+        {/* Internal Cross-Links to Primary Collection, Sister Collections & Buying Guides */}
+        <section className="border-t border-brand-line bg-brand-cream/50 py-8 sm:py-10">
+          <div className="mx-auto max-w-6xl px-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <h2 className="font-display text-lg font-extrabold uppercase tracking-wide text-brand-ink sm:text-xl">
+                Explore More in{" "}
+                <Link
+                  href={primaryCat.url}
+                  className="text-brand-red hover:underline"
+                >
+                  {primaryCat.name}
+                </Link>{" "}
+                & Related Stores
+              </h2>
+              <Link
+                href="/guides"
+                className="text-xs font-bold text-brand-red hover:underline"
+              >
+                RC Buying Guides →
+              </Link>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {PRIMARY_CATEGORIES.map((cat) => (
+                <Link
+                  key={cat.slug}
+                  href={cat.url}
+                  className="rounded-xl border border-brand-line bg-white p-3 transition hover:border-brand-red"
+                >
+                  <div className="font-mono text-[10px] font-bold uppercase text-brand-red">
+                    {cat.shortLabel}
+                  </div>
+                  <div className="mt-0.5 font-display text-sm font-extrabold uppercase text-brand-ink">
+                    {cat.name}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-brand-ink-soft line-clamp-1">
+                    {cat.seoTargetHeading}
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </section>
       </main>
       <Footer />
       <PdpFloatingUi />

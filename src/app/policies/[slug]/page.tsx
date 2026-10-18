@@ -19,10 +19,13 @@ export async function generateMetadata({
 }) {
   const { slug } = await params;
   const policy = getPolicy(slug);
-  if (!policy) return { title: "Not Found" };
+  if (!policy) return { title: "Not Found", robots: { index: false, follow: false } };
   return {
     title: policy.title,
     description: policy.intro,
+    alternates: {
+      canonical: `https://pocketrccars.com/policies/${policy.slug}`,
+    },
   };
 }
 

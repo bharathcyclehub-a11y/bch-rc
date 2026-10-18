@@ -2,13 +2,9 @@
 
 /**
  * Product override writes — the admin's edit layer over the code catalogue.
- * Persists price / MRP / visibility / badge to `product_overrides` (keyed by the
- * code SKU id + its site). Null price/MRP means "use the catalogue value". These
- * are read back by src/lib/product-overrides.ts on the PDP, the storefront grid,
- * the admin, AND the order-create pricing seam — so the price the admin sets is
- * exactly the price the customer is charged. Stock is edited separately via
- * /api/admin/inventory. Every effective change leaves an `events` audit row
- * (PRODUCT_OVERRIDE_SAVED / _CLEARED) shown on the product's Activity tab.
+ * Persists price / MRP / visibility / badge / discontinued / preorder /
+ * lowStockThreshold / featured / alternatives to `product_overrides` (keyed by
+ * the code SKU id + its site). Null price/MRP means "use the catalogue value".
  */
 
 import { revalidatePath } from "next/cache";
@@ -30,6 +26,11 @@ export type OverrideInput = {
   mrpInr: number | null;
   visibility: "active" | "coming" | "hidden";
   badge: string | null; // null = use catalogue, "" = no badge, else an allowed badge
+  discontinued?: boolean;
+  preorder?: boolean;
+  lowStockThreshold?: number | null;
+  featured?: boolean;
+  alternatives?: string[] | null;
 };
 
 type Result = { ok: boolean; error?: string };
@@ -53,6 +54,24 @@ function describeChanges(before: Sku, after: Sku) {
     changes.push({ label: "Status", from: PRODUCT_STATUS_META[s0].label, to: PRODUCT_STATUS_META[s1].label });
   if ((before.badge ?? "") !== (after.badge ?? ""))
     changes.push({ label: "Badge", from: before.badge ?? "None", to: after.badge ?? "None" });
+  if (Boolean(before.discontinued) !== Boolean(after.discontinued))
+    changes.push({ label: "Discontinued", from: before.discontinued ? "Yes" : "No", to: after.discontinued ? "Yes" : "No" });
+  if (Boolean(before.preorder) !== Boolean(after.preorder))
+    changes.push({ label: "Pre-order", from: before.preorder ? "Enabled" : "Off", to: after.preorder ? "Enabled" : "Off" });
+  if ((before.lowStockThreshold ?? 5) !== (after.lowStockThreshold ?? 5))
+    changes.push({
+      label: "Low-stock threshold",
+      from: String(before.lowStockThreshold ?? 5),
+      to: String(after.lowStockThreshold ?? 5),
+    });
+  if (Boolean(before.featured) !== Boolean(after.featured))
+    changes.push({ label: "Featured", from: before.featured ? "Yes" : "No", to: after.featured ? "Yes" : "No" });
+  if (JSON.stringify(before.alternatives ?? []) !== JSON.stringify(after.alternatives ?? []))
+    changes.push({
+      label: "Alternatives",
+      from: (before.alternatives ?? []).join(", ") || "Auto",
+      to: (after.alternatives ?? []).join(", ") || "Auto",
+    });
   return changes;
 }
 
@@ -75,7 +94,6 @@ export async function saveProductOverride(
   if (!sku) return { ok: false, error: "Unknown product." };
 
   const siteId = siteIdForSku(skuId);
-  // Guard: an admin can only edit products under a site they manage.
   if (!ctx.siteIds.includes(siteId))
     return { ok: false, error: "Not allowed for this store." };
 
@@ -99,8 +117,20 @@ export async function saveProductOverride(
 
   const hidden = input.visibility === "hidden";
   const comingSoon = input.visibility === "coming";
+  const discontinued = Boolean(input.discontinued);
+  const preorder = Boolean(input.preorder);
+  const lowStockThreshold =
+    typeof input.lowStockThreshold === "number" &&
+    Number.isFinite(input.lowStockThreshold) &&
+    input.lowStockThreshold >= 0 &&
+    input.lowStockThreshold <= 1000
+      ? Math.round(input.lowStockThreshold)
+      : null;
+  const featured = Boolean(input.featured);
+  const alternatives = Array.isArray(input.alternatives)
+    ? input.alternatives.map((s) => s.trim()).filter(Boolean).slice(0, 8)
+    : null;
 
-  // Previous override (if any) → the effective before/after for the audit row.
   let prev: ProductOverride | undefined;
   try {
     [prev] = await db
@@ -111,11 +141,30 @@ export async function saveProductOverride(
         hidden: productOverrides.hidden,
         comingSoon: productOverrides.comingSoon,
         badge: productOverrides.badge,
+        discontinued: productOverrides.discontinued,
+        preorder: productOverrides.preorder,
+        lowStockThreshold: productOverrides.lowStockThreshold,
+        featured: productOverrides.featured,
+        alternatives: productOverrides.alternatives,
       })
       .from(productOverrides)
       .where(and(eq(productOverrides.siteId, siteId), eq(productOverrides.skuId, skuId)));
   } catch {
-    prev = undefined;
+    try {
+      [prev] = await db
+        .select({
+          skuId: productOverrides.skuId,
+          priceInr: productOverrides.priceInr,
+          mrpInr: productOverrides.mrpInr,
+          hidden: productOverrides.hidden,
+          comingSoon: productOverrides.comingSoon,
+          badge: productOverrides.badge,
+        })
+        .from(productOverrides)
+        .where(and(eq(productOverrides.siteId, siteId), eq(productOverrides.skuId, skuId)));
+    } catch {
+      prev = undefined;
+    }
   }
 
   try {
@@ -129,6 +178,11 @@ export async function saveProductOverride(
         hidden,
         comingSoon,
         badge,
+        discontinued,
+        preorder,
+        lowStockThreshold,
+        featured,
+        alternatives,
         updatedBy: ctx.email,
       })
       .onConflictDoUpdate({
@@ -139,28 +193,73 @@ export async function saveProductOverride(
           hidden,
           comingSoon,
           badge,
+          discontinued,
+          preorder,
+          lowStockThreshold,
+          featured,
+          alternatives,
           updatedAt: new Date(),
           updatedBy: ctx.email,
         },
       });
   } catch {
-    return {
-      ok: false,
-      error:
-        "Couldn't save — the product_overrides table may not exist yet. Apply the migration in Supabase first.",
-    };
+    // Fallback if extended columns migration hasn't been run yet
+    try {
+      await db
+        .insert(productOverrides)
+        .values({
+          siteId,
+          skuId,
+          priceInr: price,
+          mrpInr: mrp,
+          hidden,
+          comingSoon,
+          badge,
+          updatedBy: ctx.email,
+        })
+        .onConflictDoUpdate({
+          target: [productOverrides.siteId, productOverrides.skuId],
+          set: {
+            priceInr: price,
+            mrpInr: mrp,
+            hidden,
+            comingSoon,
+            badge,
+            updatedAt: new Date(),
+            updatedBy: ctx.email,
+          },
+        });
+    } catch {
+      return {
+        ok: false,
+        error:
+          "Couldn't save — the product_overrides table may not exist yet. Apply the migration in Supabase first.",
+      };
+    }
   }
 
   const changes = describeChanges(
     applyOverride(sku, prev),
-    applyOverride(sku, { skuId, priceInr: price, mrpInr: mrp, hidden, comingSoon, badge }),
+    applyOverride(sku, {
+      skuId,
+      priceInr: price,
+      mrpInr: mrp,
+      hidden,
+      comingSoon,
+      badge,
+      discontinued,
+      preorder,
+      lowStockThreshold,
+      featured,
+      alternatives,
+    }),
   );
   if (changes.length) await audit(siteId, "PRODUCT_OVERRIDE_SAVED", { skuId, changes, by: ctx.email });
 
   revalidatePath("/admin/products");
   revalidatePath(`/admin/products/${skuId}`);
   revalidatePath(`/product/${sku.slug}`);
-  revalidatePath("/"); // storefront grid
+  revalidatePath("/");
   return { ok: true };
 }
 

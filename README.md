@@ -40,6 +40,10 @@ DATABASE_POOL_MAX=1                 # PGlite is a single session
 ADMIN_DEV_EMAIL=dev@pocketrc.local  # local-only admin sign-in
 ```
 
+The local database server allows 32 client connections, leaving room for the
+storefront, support pages, hot reloads and migration scripts to share it.
+Keep `DATABASE_POOL_MAX=1` for each application process.
+
 `ADMIN_DEV_EMAIL` only works under `next dev` while Supabase is **not**
 configured, and the email must exist in the connected `admins` table (the setup
 script creates it). The setup script refuses to run against a non-localhost

@@ -41,6 +41,13 @@ export const FUNNEL_EVENTS = [
   "bargain_checkout", // tapped "Buy now" → went to checkout with the won code
   "bargain_coupon_applied", // a BG- coupon validated at checkout (metadata.discountInr)
   "bargain_payment_success", // order paid on a BG- coupon (attribution; orders table is authoritative)
+  // --- inventory UX, category & restock conversion signals ---
+  "category_view", // clicked a category card or View Store CTA (metadata.category, via)
+  "colour_change", // selected a colour swatch (metadata.skuId, variantSlug, status)
+  "sold_out_view", // viewed a sold-out product or variant (metadata.skuId, variantSlug)
+  "alternative_click", // clicked a recommended alternative (metadata.skuId, targetSkuId, placement)
+  "restock_request", // subscribed to back-in-stock alert (metadata.skuId, variantSlug, channel) — no PII stored
+  "checkout_stock_failure", // checkout blocked by stock change (metadata.skuId, variantSlug, reason)
 ] as const;
 
 export type FunnelEventType = (typeof FUNNEL_EVENTS)[number];
@@ -108,6 +115,7 @@ const METADATA_KEYS = new Set([
   "subtotalInr", "totalInr", "amountInr", "discountInr", "pincode", "serviceable",
   "codAvailable", "paymentMethod", "method", "reason", "failureReason", "variant",
   "placement", "via", "code", "bucket", "trigger", "outcome", "attempt", "guessInr",
+  "variantSlug", "targetSkuId", "channel", "status", "category", "name", "priceInr",
 ]);
 
 export function cleanFunnelMetadata(value: unknown): Record<string, string | number | boolean | null> {

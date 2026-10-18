@@ -297,6 +297,11 @@ export const productOverrides = pgTable(
     mrpInr: integer("mrp_inr"), // null → code mrpINR
     hidden: boolean("hidden"), // null → code value
     comingSoon: boolean("coming_soon"), // null → code value
+    discontinued: boolean("discontinued"), // null → code value
+    preorder: boolean("preorder"), // null → code value (only when explicitly enabled by admin)
+    lowStockThreshold: integer("low_stock_threshold"), // null → LOW_STOCK_THRESHOLD
+    featured: boolean("featured"), // null → code value
+    alternatives: text("alternatives").array(), // null → code value
     badge: text("badge"), // null → code badge; "" clears it
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
@@ -304,6 +309,55 @@ export const productOverrides = pgTable(
     updatedBy: text("updated_by"),
   },
   (t) => [primaryKey({ columns: [t.siteId, t.skuId] })],
+);
+
+// ============================================================
+// 5c. STORE CATEGORIES — centralized 4-category storefront & SEO model
+// ============================================================
+// Stores the 4 approved primary shopping categories (mini-rc-cars, drift-racing,
+// construction-rc, hobby-grade) with SEO metadata, display order, published
+// status, parent relationship, related product mappings, and landing content.
+// Code fallback lives in `src/lib/categories.ts` so the storefront renders
+// seamlessly even before migration or when DB is offline.
+
+export const storeCategories = pgTable(
+  "store_categories",
+  {
+    id: text("id").notNull(), // e.g. "cat-mini-rc-cars"
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(), // e.g. "mini-rc-cars"
+    description: text("description").notNull(),
+    seoTitle: text("seo_title").notNull(),
+    seoDescription: text("seo_description").notNull(),
+    seoTargetHeading: text("seo_target_heading").notNull(),
+    image: text("image").notNull(),
+    displayOrder: integer("display_order").notNull().default(0),
+    published: boolean("published").notNull().default(true),
+    primaryParent: text("primary_parent"),
+    relatedProductIds: text("related_product_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    legacyKeys: text("legacy_keys")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    landingContent: jsonb("landing_content"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.siteId, t.id] }),
+    unique("store_categories_site_slug_unique").on(t.siteId, t.slug),
+    index("store_categories_site_order_idx").on(t.siteId, t.displayOrder),
+  ],
 );
 
 // ============================================================
@@ -1031,6 +1085,54 @@ export const bargainSessions = pgTable(
 );
 
 // ============================================================
+// 11d. RESTOCK SUBSCRIPTIONS — back-in-stock opt-in alerts
+// ============================================================
+
+export const restockSubscriptions = pgTable(
+  "restock_subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id),
+    skuId: text("sku_id").notNull(),
+    variantSlug: text("variant_slug").notNull().default(""),
+    /** 'email' | 'whatsapp' */
+    channel: text("channel").notNull(),
+    /** Normalized email or 10-digit Indian phone number */
+    contact: text("contact").notNull(),
+    /** Explicit customer consent to receive a one-time restock alert */
+    consent: boolean("consent").notNull().default(true),
+    /** 'ACTIVE' | 'NOTIFIED' | 'UNSUBSCRIBED' */
+    status: text("status").notNull().default("ACTIVE"),
+    unsubscribeToken: text("unsubscribe_token").notNull(),
+    notifiedAt: timestamp("notified_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("restock_sub_unique").on(
+      t.siteId,
+      t.skuId,
+      t.variantSlug,
+      t.channel,
+      t.contact,
+    ),
+    index("restock_sub_sku_status_idx").on(
+      t.siteId,
+      t.skuId,
+      t.variantSlug,
+      t.status,
+    ),
+    index("restock_sub_token_idx").on(t.unsubscribeToken),
+  ],
+);
+
+// ============================================================
 // 12. ADMINS — cross-site dashboard access
 // ============================================================
 
@@ -1514,3 +1616,7 @@ export type SupportTicketMessageRow = typeof supportTicketMessages.$inferSelect;
 export type SupportClaimRow = typeof supportClaims.$inferSelect;
 export type RefundCaseRow = typeof refundCases.$inferSelect;
 export type HelpArticleRow = typeof helpArticles.$inferSelect;
+export type RestockSubscription = typeof restockSubscriptions.$inferSelect;
+export type NewRestockSubscription = typeof restockSubscriptions.$inferInsert;
+export type StoreCategoryRow = typeof storeCategories.$inferSelect;
+export type NewStoreCategoryRow = typeof storeCategories.$inferInsert;

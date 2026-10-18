@@ -104,34 +104,57 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
   const maintResponse = maintenanceCheck(request);
   if (maintResponse) return maintResponse;
 
-  // 1:16 "Big" store on its own subdomain. When a request arrives on the host
-  // named in STORE16_HOST (e.g. big.pocketrccars.com), serve the /16 store at
-  // the root. Env-gated → completely inert until the subdomain is configured in
-  // Vercel, so this is a no-op for the main site. Only the root path is
-  // rewritten; /16/*, /checkout, /api, /track etc. already resolve as-is.
+  // Canonical hostname & legacy /16 store consolidation:
+  // 1. Redirect www.pocketrccars.com → https://pocketrccars.com (fixes 50/50 GSC impression split).
+  // 2. Redirect legacy prc16.pocketrccars.com subdomain (or STORE16_HOST) → https://pocketrccars.com.
+  // 3. Redirect legacy /16 and /16/[slug] routes → /collections/drift-racing and /product/[slug].
+  const host = (request.headers.get("host") ?? "")
+    .toLowerCase()
+    .split(":")[0];
+  const path = request.nextUrl.pathname;
+  const search = request.nextUrl.search;
   const store16Host = process.env.STORE16_HOST?.trim().toLowerCase();
-  if (store16Host) {
-    const host = (request.headers.get("host") ?? "")
-      .toLowerCase()
-      .split(":")[0];
-    const path = request.nextUrl.pathname;
-    if (host === store16Host) {
-      // On the 16 subdomain, serve the /16 store at the root.
-      if (path === "/") {
-        const url = request.nextUrl.clone();
-        url.pathname = "/16";
-        return NextResponse.rewrite(url);
-      }
-    } else if (path === "/16" || path.startsWith("/16/")) {
-      // On the MAIN domain (pocketrccars.com), the 16 store lives ONLY on its
-      // subdomain — permanently redirect the old /16 path there so it isn't a
-      // duplicate, indexable URL. (Inert in local/preview where STORE16_HOST is
-      // unset, so /16 stays reachable for development.)
+
+  if (
+    host === "prc16.pocketrccars.com" ||
+    (store16Host && host === store16Host)
+  ) {
+    if (path === "/" || path === "/16") {
       return NextResponse.redirect(
-        `https://${store16Host}${path}${request.nextUrl.search}`,
+        `https://pocketrccars.com/collections/drift-racing${search}`,
         308,
       );
     }
+    if (path.startsWith("/16/")) {
+      const slug = path.slice("/16/".length);
+      return NextResponse.redirect(
+        `https://pocketrccars.com/product/${slug}${search}`,
+        308,
+      );
+    }
+    return NextResponse.redirect(
+      `https://pocketrccars.com${path}${search}`,
+      308,
+    );
+  }
+
+  if (host === "www.pocketrccars.com") {
+    return NextResponse.redirect(
+      `https://pocketrccars.com${path}${search}`,
+      308,
+    );
+  }
+
+  if (path === "/16") {
+    const dest = request.nextUrl.clone();
+    dest.pathname = "/collections/drift-racing";
+    return NextResponse.redirect(dest, 308);
+  }
+  if (path.startsWith("/16/")) {
+    const slug = path.slice("/16/".length);
+    const dest = request.nextUrl.clone();
+    dest.pathname = `/product/${slug}`;
+    return NextResponse.redirect(dest, 308);
   }
 
   let response = NextResponse.next({ request });

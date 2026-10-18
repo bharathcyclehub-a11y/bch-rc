@@ -19,6 +19,7 @@
 import { NextResponse, after, type NextRequest } from "next/server";
 import { recordServerFunnelEvent } from "@/lib/funnel-server";
 import { getOverrideMap, applyOverride } from "@/lib/product-overrides";
+import { getBundleComponentSkuIds } from "@/lib/availability";
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { db } from "@/db";
@@ -89,6 +90,93 @@ type OrderItemSnapshot = {
   lineTotalInr: number;
 };
 
+class StockConflictError extends Error {
+  skuId: string;
+  variantSlug: string | null;
+  availableQty: number;
+  code: "OUT_OF_STOCK" | "INSUFFICIENT_STOCK" | "UNCONFIGURED";
+
+  constructor(opts: {
+    message: string;
+    skuId: string;
+    variantSlug: string | null;
+    availableQty: number;
+    code: "OUT_OF_STOCK" | "INSUFFICIENT_STOCK" | "UNCONFIGURED";
+  }) {
+    super(`STOCK:${opts.message}`);
+    this.skuId = opts.skuId;
+    this.variantSlug = opts.variantSlug;
+    this.availableQty = opts.availableQty;
+    this.code = opts.code;
+  }
+}
+
+async function buildIdempotentReplayResponse(o: typeof orders.$inferSelect) {
+  // Legacy 0-fee COD needs no Razorpay order
+  if (o.paymentMethod === "COD" && o.confirmationFeeInr <= 0) {
+    return NextResponse.json({
+      ok: true,
+      orderId: o.id,
+      paymentMethod: "COD",
+      amountInr: o.totalInr,
+      replayed: true,
+    });
+  }
+
+  // Both full prepaid AND partial-prepaid COD (confirmationFeeInr > 0) require
+  // a valid razorpayOrderId so the client opens the Razorpay modal rather than
+  // skipping payment verification.
+  const razorpayAmountInr =
+    o.paymentMethod === "COD" ? o.confirmationFeeInr : o.totalInr;
+  let razorpayOrderId = o.razorpayOrderId;
+  if (!razorpayOrderId) {
+    try {
+      const rzpOrder = await razorpay.orders.create({
+        amount: razorpayAmountInr * 100,
+        currency: "INR",
+        receipt: o.id,
+        notes: {
+          site: o.siteId,
+          customerId: o.customerId,
+          phone: (o.shippingAddress as { phone: string }).phone,
+          flow: o.paymentMethod === "COD" ? "cod_confirmation" : "prepaid",
+          totalInr: o.totalInr,
+          confirmationFeeInr: o.confirmationFeeInr,
+          recoveredFor: "idempotency-replay",
+        },
+      });
+      razorpayOrderId = rzpOrder.id;
+      await db
+        .update(orders)
+        .set({ razorpayOrderId, updatedAt: new Date() })
+        .where(eq(orders.id, o.id));
+    } catch (err) {
+      logError("order:create:replay-razorpay", err, { orderId: o.id });
+      return NextResponse.json(
+        { error: "Payment provider unavailable — retry in a minute." },
+        { status: 503 },
+      );
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    orderId: o.id,
+    paymentMethod: o.paymentMethod,
+    razorpayOrderId,
+    razorpayKeyId: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+    amountInr: razorpayAmountInr,
+    codBalanceInr:
+      o.paymentMethod === "COD" ? o.totalInr - razorpayAmountInr : 0,
+    confirmationFeeInr: o.confirmationFeeInr,
+    totalInr: o.totalInr,
+    customerName: (o.shippingAddress as { fullName: string }).fullName,
+    customerEmail: (o.shippingAddress as { email?: string }).email,
+    customerPhone: (o.shippingAddress as { phone: string }).phone,
+    replayed: true,
+  });
+}
+
 export async function POST(req: NextRequest) {
   // DoS backstop on the most expensive endpoint (DB txn + live Razorpay order
   // creation). Generous cap — idempotency already covers legitimate retries, so
@@ -117,68 +205,10 @@ export async function POST(req: NextRequest) {
     .limit(1);
 
   if (existing.length > 0) {
-    const o = existing[0];
-    if (o.paymentMethod === "COD") {
-      return NextResponse.json({
-        ok: true,
-        orderId: o.id,
-        paymentMethod: "COD",
-        amountInr: o.totalInr,
-        replayed: true,
-      });
-    }
-    // Idempotency recovery: prior attempt persisted the order row but the
-    // Razorpay API call failed (or hadn't run yet). Create the Razorpay
-    // order now, persist, and return a usable payload. Without this, the
-    // client opens Razorpay with order_id=null and the customer is stuck.
-    let razorpayOrderId = o.razorpayOrderId;
-    if (!razorpayOrderId) {
-      try {
-        const rzpOrder = await razorpay.orders.create({
-          amount: o.totalInr * 100,
-          currency: "INR",
-          receipt: o.id,
-          notes: {
-            site: o.siteId,
-            customerId: o.customerId,
-            phone: (o.shippingAddress as { phone: string }).phone,
-            recoveredFor: "idempotency-replay",
-          },
-        });
-        razorpayOrderId = rzpOrder.id;
-        await db
-          .update(orders)
-          .set({ razorpayOrderId, updatedAt: new Date() })
-          .where(eq(orders.id, o.id));
-      } catch (err) {
-        logError("order:create:replay-razorpay", err, { orderId: o.id });
-        return NextResponse.json(
-          { error: "Payment provider unavailable — try COD or retry in a minute." },
-          { status: 503 },
-        );
-      }
-    }
-    return NextResponse.json({
-      ok: true,
-      orderId: o.id,
-      paymentMethod: o.paymentMethod,
-      razorpayOrderId,
-      razorpayKeyId: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
-      amountInr: o.totalInr,
-      customerName: (o.shippingAddress as { fullName: string }).fullName,
-      customerEmail: (o.shippingAddress as { email?: string }).email,
-      customerPhone: (o.shippingAddress as { phone: string }).phone,
-      replayed: true,
-    });
+    return buildIdempotentReplayResponse(existing[0]);
   }
 
   // ── 0. Serviceability gate ───────────────────────────────────────
-  // HARD block before we create anything: never accept an order for a pincode
-  // we can't deliver to, or COD where COD isn't available. This is the
-  // authoritative check (the checkout UI previews the same result). Placed
-  // after the idempotency short-circuit so replays of already-valid orders
-  // always succeed. Live Shiprocket call - falls back to the heuristic on
-  // API outage so a courier-side blip can't kill checkout.
   const svc = await verifyServiceabilityLive(
     body.address.pincode,
     body.paymentMethod === "COD",
@@ -200,12 +230,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── 1. Validate every line item against catalog + variant inStock ──
+  // ── 1. Validate every line item against catalog + overrides ──────
   const lineItems: OrderItemSnapshot[] = [];
   let subtotal = 0;
 
-  // Admin price/visibility overrides are authoritative here — the price the
-  // admin set is the price charged. Empty (no-op) before the migration is run.
+  // Admin price/visibility/status overrides are authoritative here.
   const overrides = await getOverrideMap();
 
   for (const item of body.items) {
@@ -217,6 +246,19 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+    if (sku.discontinued) {
+      return NextResponse.json(
+        { error: `${sku.name} has been discontinued and is no longer available for purchase.` },
+        { status: 409 },
+      );
+    }
+    if (sku.comingSoon && !sku.preorder) {
+      return NextResponse.json(
+        { error: `${sku.name} is coming soon and is not yet open for orders.` },
+        { status: 409 },
+      );
+    }
+
     let variantName: string | null = null;
     let variantImage: string | null = null;
     if (sku.colors && sku.colors.length > 0) {
@@ -234,20 +276,10 @@ export async function POST(req: NextRequest) {
           { status: 400 },
         );
       }
-      if (variant.stock <= 0) {
-        return NextResponse.json(
-          { error: `${sku.name} (${variant.name}) is sold out` },
-          { status: 409 },
-        );
-      }
-      if (item.qty > variant.stock) {
-        return NextResponse.json(
-          {
-            error: `Only ${variant.stock} ${sku.name} (${variant.name}) left — reduce qty`,
-          },
-          { status: 409 },
-        );
-      }
+      // NOTE: Do NOT gate on static `variant.stock` from products.ts — that value
+      // is seed-only (e.g. pocket-thar Black has seed stock=1 while DB inventory
+      // has 50). The DB transaction in Step 3a below is the single authoritative
+      // stock gate.
       variantName = variant.name;
       variantImage = variant.image ?? null;
     }
@@ -258,7 +290,7 @@ export async function POST(req: NextRequest) {
     subtotal += lineTotal;
     lineItems.push({
       skuId: sku.id,
-      variantSlug: item.variantSlug ?? null,
+      variantSlug: sku.colors && sku.colors.length > 0 ? (item.variantSlug ?? null) : null,
       name: displayName,
       image: displayImage,
       unitPriceInr: sku.retailINR,
@@ -275,16 +307,7 @@ export async function POST(req: NextRequest) {
       : 0;
   const prepaidDiscount =
     body.paymentMethod !== "COD" ? OFFERS.prepaidDiscountINR : 0;
-  // Partial-prepaid COD confirmation fee — the Razorpay-captured upfront
-  // amount for "Pay X now and rest Cash on Delivery". 10 % of subtotal,
-  // rounded up to ₹50, clamped ₹100-₹300.
-  //
-  // Refund policy (locked with Syed 2026-06-13 over WhatsApp):
-  //   • Before shipment dispatch  → REFUNDABLE (Razorpay refund on cancel)
-  //   • After shipment dispatch   → NON-REFUNDABLE (anti-flake fee)
-  //   • Exception                 → defective product = refundable post-ship
-  // 1:16 "Big" orders use the lighter ₹200 upfront cap; 1:64 keeps ₹300.
-  // Detected from the resolved line items so the client can't spoof a lower fee.
+
   const is16Order =
     lineItems.length > 0 &&
     lineItems.every(
@@ -297,17 +320,10 @@ export async function POST(req: NextRequest) {
           is16Order ? COD_CONFIRMATION_16_MAX_INR : undefined,
         )
       : 0;
-  // Bundle bonus — auto-applied when the customer adds any 2+ cars.
-  // Now a PERCENTAGE of the subtotal (2→5% · 3→10% · 4/5→15% · 6+→20%), driven
-  // by TOTAL cart quantity so 2-of-the-same and 1-each-of-two both qualify.
-  // Server-side authoritative so a client can't spoof the discount.
   const cartQty = body.items.reduce((n, i) => n + i.qty, 0);
   const bundleDiscount = bundleDiscountInr(cartQty, subtotal);
 
-  // ── 2b. Resolve marketing attribution (first-touch) from the visitor's
-  //        analytics session, to snapshot onto the order. Best-effort and
-  //        read-only — never blocks checkout. Done before the txn loop so a
-  //        retry doesn't re-query it.
+  // ── 2b. Resolve marketing attribution (first-touch) ────────────
   const cookieStore = await cookies();
   const attribution = await resolveOrderAttribution({
     visitorId: cookieStore.get(VISITOR_COOKIE)?.value,
@@ -315,11 +331,8 @@ export async function POST(req: NextRequest) {
     siteId: body.siteId,
   });
 
-  // ── 3. Open transaction: atomic stock decrement, customer upsert, coupon
-  //       redemption (with customerId for per-customer limit), address insert,
-  //       order insert, event insert, notification outbox insert.
-  //       All-or-nothing. Stock decrement is the FIRST mutation so an
-  //       overselling attempt fails fast without touching customer data.
+  // ── 3. Open transaction: atomic stock decrement (including bundle components),
+  //       customer upsert, coupon redemption, address insert, order insert.
   let orderId = generateOrderId("PRC");
   let attempts = 0;
   type TxnResult = {
@@ -336,64 +349,128 @@ export async function POST(req: NextRequest) {
 
   let txnResult: TxnResult | null = null;
 
+  // Build deterministic list of inventory requirements (aggregating duplicate lines
+  // and expanding bundle component SKUs) sorted by key to prevent row-lock deadlocks.
+  type StockRequirement = {
+    skuId: string;
+    variantSlug: string;
+    qty: number;
+    label: string;
+    parentSkuId: string;
+    parentVariantSlug: string | null;
+  };
+  const reqMap = new Map<string, StockRequirement>();
+  for (const item of body.items) {
+    const base = PRODUCTS.find((p) => p.id === item.skuId);
+    const sku = base ? applyOverride(base, overrides.get(item.skuId)) : undefined;
+    if (!sku) continue;
+    const variantKey = sku.colors && sku.colors.length > 0 ? (item.variantSlug ?? "") : "";
+    const variantObj = sku.colors?.find((c) => c.slug === variantKey);
+    const label = variantObj ? `${sku.name} (${variantObj.name})` : sku.name;
+    const mapKey = `${sku.id}:${variantKey}`;
+    const existingReq = reqMap.get(mapKey);
+    if (existingReq) {
+      existingReq.qty += item.qty;
+    } else {
+      reqMap.set(mapKey, {
+        skuId: sku.id,
+        variantSlug: variantKey,
+        qty: item.qty,
+        label,
+        parentSkuId: sku.id,
+        parentVariantSlug: variantKey || null,
+      });
+    }
+
+    // Also require component SKUs for fixed-price bundles (e.g. construction-3pack)
+    const compIds = getBundleComponentSkuIds(sku);
+    for (const compId of compIds) {
+      const compSku = PRODUCTS.find((p) => p.id === compId);
+      const compKey = `${compId}:`;
+      const compLabel = compSku
+        ? `${sku.name} (${compSku.name})`
+        : `${sku.name} (${compId})`;
+      const existingComp = reqMap.get(compKey);
+      if (existingComp) {
+        existingComp.qty += item.qty;
+      } else {
+        reqMap.set(compKey, {
+          skuId: compId,
+          variantSlug: "",
+          qty: item.qty,
+          label: compLabel,
+          parentSkuId: sku.id,
+          parentVariantSlug: null,
+        });
+      }
+    }
+  }
+  const sortedStockReqs = Array.from(reqMap.values()).sort((a, b) =>
+    `${a.skuId}:${a.variantSlug}`.localeCompare(`${b.skuId}:${b.variantSlug}`),
+  );
+
   while (attempts < 3 && !txnResult) {
     try {
       txnResult = await db.transaction(async (tx) => {
-        // 3a. Atomic stock decrement. UPDATE returns the new stock row only
-        //     when the gate (`stock >= $qty`) holds. Zero rows back → reject.
-        //     Empty variantSlug ("") is the row for colourless SKUs.
-        //     ONE single inventory: every row lives under INVENTORY_SITE_ID,
-        //     regardless of which storefront posted the order — a hub cart can
-        //     mix any scales and every line hits the same keyspace.
-        for (const item of body.items) {
-          const variantKey = item.variantSlug ?? "";
-          const sku = PRODUCTS.find((p) => p.id === item.skuId);
-          if (!sku) continue; // already validated above
+        // 3a. Atomic stock decrement in canonical key order.
+        for (const reqItem of sortedStockReqs) {
           const decremented = await tx
             .update(inventory)
-            .set({ stock: sql`${inventory.stock} - ${item.qty}`, updatedAt: new Date() })
+            .set({
+              stock: sql`${inventory.stock} - ${reqItem.qty}`,
+              updatedAt: new Date(),
+            })
             .where(
               and(
                 eq(inventory.siteId, INVENTORY_SITE_ID),
-                eq(inventory.skuId, item.skuId),
-                eq(inventory.variantSlug, variantKey),
-                sql`${inventory.stock} >= ${item.qty}`,
+                eq(inventory.skuId, reqItem.skuId),
+                eq(inventory.variantSlug, reqItem.variantSlug),
+                sql`${inventory.stock} >= ${reqItem.qty}`,
               ),
             )
             .returning({ stock: inventory.stock });
 
           if (decremented.length === 0) {
-            // Inventory row doesn't exist OR stock was insufficient. Look up
-            // current stock to disambiguate in the error message.
             const current = await tx
               .select({ stock: inventory.stock })
               .from(inventory)
               .where(
                 and(
                   eq(inventory.siteId, INVENTORY_SITE_ID),
-                  eq(inventory.skuId, item.skuId),
-                  eq(inventory.variantSlug, variantKey),
+                  eq(inventory.skuId, reqItem.skuId),
+                  eq(inventory.variantSlug, reqItem.variantSlug),
                 ),
               );
             if (current.length === 0) {
-              throw new Error(
-                `STOCK:Inventory not configured for ${sku.name}${variantKey ? ` (${variantKey})` : ""}`,
-              );
+              throw new StockConflictError({
+                message: `Inventory not configured for ${reqItem.label}`,
+                skuId: reqItem.parentSkuId,
+                variantSlug: reqItem.parentVariantSlug,
+                availableQty: 0,
+                code: "UNCONFIGURED",
+              });
             }
-            const available = current[0].stock;
+            const available = Math.max(0, current[0].stock);
             if (available <= 0) {
-              throw new Error(
-                `STOCK:${sku.name}${variantKey ? ` (${variantKey})` : ""} is sold out`,
-              );
+              throw new StockConflictError({
+                message: `${reqItem.label} just sold out`,
+                skuId: reqItem.parentSkuId,
+                variantSlug: reqItem.parentVariantSlug,
+                availableQty: 0,
+                code: "OUT_OF_STOCK",
+              });
             }
-            throw new Error(
-              `STOCK:Only ${available} ${sku.name}${variantKey ? ` (${variantKey})` : ""} left — reduce qty`,
-            );
+            throw new StockConflictError({
+              message: `Only ${available} ${reqItem.label} left in stock — please reduce quantity to ${available}`,
+              skuId: reqItem.parentSkuId,
+              variantSlug: reqItem.parentVariantSlug,
+              availableQty: available,
+              code: "INSUFFICIENT_STOCK",
+            });
           }
         }
 
-        // 3b. UPSERT customer by phone. Needed before coupon redemption so
-        //     the per-customer limit check has a customer id to count against.
+        // 3b. UPSERT customer by phone.
         const [customer] = await tx
           .insert(customers)
           .values({
@@ -412,10 +489,7 @@ export async function POST(req: NextRequest) {
           })
           .returning();
 
-        // 3c. INSERT the order row early with PENDING totals. We need the
-        //     order id present in the DB before redeemCoupon (the ledger row
-        //     FK-references orders.id) — but we don't know the final total
-        //     yet. We'll UPDATE it after coupon redemption resolves.
+        // 3c. INSERT the order row early with PENDING totals.
         const totalBeforeCoupon =
           subtotal + shipping + codFee - prepaidDiscount - bundleDiscount;
         if (totalBeforeCoupon <= 0) {
@@ -439,8 +513,6 @@ export async function POST(req: NextRequest) {
           couponCode: null,
           paymentMethod: body.paymentMethod,
           paymentStatus: "PENDING",
-          // First-touch marketing attribution — turns clicks-per-channel into
-          // paid-orders-per-channel once these are reported in /admin/analytics.
           source: attribution.source,
           utmSource: attribution.utmSource,
           utmMedium: attribution.utmMedium,
@@ -452,8 +524,6 @@ export async function POST(req: NextRequest) {
         // 3d. Coupon — atomic redeem + per-customer-limit guard + ledger.
         let couponDiscountInr = 0;
         let appliedCouponCode: string | null = null;
-        // A bargain coupon is the negotiated FINAL price — it must NOT stack with
-        // the prepaid/bundle discounts (see below). Always false for normal coupons.
         let couponIsBargain = false;
         if (body.couponCode && body.couponCode.trim()) {
           try {
@@ -465,8 +535,6 @@ export async function POST(req: NextRequest) {
               orderId,
               subtotalInr: subtotal,
               shippingInr: shipping,
-              // Authoritative SKU gate for a bargain coupon: the exact car must
-              // be in this order or redemption throws + rolls back.
               cartSkuIds: lineItems.map((i) => i.skuId),
             });
             couponDiscountInr = result.discountInr;
@@ -480,16 +548,21 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Bargain coupons are the negotiated FINAL price: they do NOT stack with
-        // the prepaid or bundle discounts. Zero those for a bargain order so the
-        // buyer pays exactly what they negotiated. This is the server-authoritative
-        // guard; the checkout UI mirrors it. Normal coupons are untouched
-        // (couponIsBargain is always false for them → identical to before).
-        const effPrepaidDiscount = couponIsBargain ? 0 : prepaidDiscount;
-        const effBundleDiscount = couponIsBargain ? 0 : bundleDiscount;
+        // Bargain coupons represent a negotiated final price and do not stack with
+        // prepaid/bundle discounts — EXCEPT they must never charge the customer MORE
+        // than the standard auto-applied discounts (matching src/lib/pricing.ts).
+        const standardDiscounts = prepaidDiscount + bundleDiscount;
+        const bargainWins = couponIsBargain && couponDiscountInr >= standardDiscounts;
+        const effPrepaidDiscount = bargainWins ? 0 : prepaidDiscount;
+        const effBundleDiscount = bargainWins ? 0 : bundleDiscount;
+        const effCouponDiscount =
+          couponIsBargain && !bargainWins ? 0 : couponDiscountInr;
+        const totalDiscountInr =
+          effPrepaidDiscount + effBundleDiscount + effCouponDiscount;
+
         const total = Math.max(
           0,
-          subtotal + shipping + codFee - effPrepaidDiscount - effBundleDiscount - couponDiscountInr,
+          subtotal + shipping + codFee - totalDiscountInr,
         );
         if (total <= 0) {
           throw new Error("BODY:Invalid total");
@@ -500,7 +573,7 @@ export async function POST(req: NextRequest) {
           await tx
             .update(orders)
             .set({
-              discountInr: effPrepaidDiscount + effBundleDiscount + couponDiscountInr,
+              discountInr: totalDiscountInr,
               totalInr: total,
               couponCode: appliedCouponCode,
               updatedAt: new Date(),
@@ -529,18 +602,11 @@ export async function POST(req: NextRequest) {
             paymentMethod: body.paymentMethod,
             itemCount: lineItems.length,
             couponCode: appliedCouponCode,
-            couponDiscountInr,
+            couponDiscountInr: effCouponDiscount,
           },
           source: "user",
         });
 
-        // 3f. Enqueue the legacy COD ORDER_RECEIVED placeholder email INSIDE
-        //     the transaction. This branch is now effectively dead — all new
-        //     COD orders carry a non-zero confirmationFeeInr and follow the
-        //     partial-prepaid Razorpay flow (webhook fires ORDER_CONFIRMED on
-        //     capture, same as full prepaid). Kept as a defensive fallback
-        //     for the unlikely case where computeCodConfirmationFee returns 0
-        //     (e.g. config misedit) — old /cod manual-verify queue still works.
         let notificationId: string | null = null;
         if (body.paymentMethod === "COD" && confirmationFee === 0) {
           const [n] = await tx
@@ -569,7 +635,7 @@ export async function POST(req: NextRequest) {
                 subtotalInr: subtotal,
                 shippingInr: shipping,
                 codFeeInr: codFee,
-                discountInr: prepaidDiscount + couponDiscountInr,
+                discountInr: totalDiscountInr,
                 couponCode: appliedCouponCode,
                 shippingAddress: {
                   fullName: body.address.fullName,
@@ -592,7 +658,7 @@ export async function POST(req: NextRequest) {
           customerName: body.address.fullName,
           customerEmail: body.address.email,
           customerPhone: body.address.phone,
-          couponDiscountInr,
+          couponDiscountInr: effCouponDiscount,
           appliedCouponCode,
           total,
           notificationId,
@@ -605,8 +671,6 @@ export async function POST(req: NextRequest) {
         "code" in err &&
         (err as { code?: string }).code === "23505"
       ) {
-        // Unique violation — could be order_id collision OR idempotency_key
-        // race (a duplicate request started in parallel).
         const msg = (err as { detail?: string }).detail ?? "";
         if (msg.includes("idempotency_key")) {
           const replay = await db
@@ -615,26 +679,58 @@ export async function POST(req: NextRequest) {
             .where(eq(orders.idempotencyKey, body.idempotencyKey))
             .limit(1);
           if (replay[0]) {
-            const o = replay[0];
-            return NextResponse.json({
-              ok: true,
-              orderId: o.id,
-              paymentMethod: o.paymentMethod,
-              amountInr: o.totalInr,
-              razorpayOrderId: o.razorpayOrderId ?? undefined,
-              razorpayKeyId:
-                o.paymentMethod !== "COD" ? process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID : undefined,
-              customerName: (o.shippingAddress as { fullName: string }).fullName,
-              customerEmail: (o.shippingAddress as { email?: string }).email,
-              customerPhone: (o.shippingAddress as { phone: string }).phone,
-              replayed: true,
-            });
+            return buildIdempotentReplayResponse(replay[0]);
           }
         }
-        // nanoid collision — regenerate order id and retry.
         orderId = generateOrderId("PRC");
         attempts++;
         continue;
+      }
+      if (err instanceof StockConflictError) {
+        const conflictMsg = err.message.slice(6);
+        after(async () => {
+          try {
+            await db.insert(events).values({
+              siteId: body.siteId,
+              type: "ORDER_STOCK_FAILURE",
+              payload: {
+                skuId: err.skuId,
+                variantSlug: err.variantSlug,
+                availableQty: err.availableQty,
+                code: err.code,
+                message: conflictMsg,
+                requestedItems: body.items.map((i) => ({
+                  skuId: i.skuId,
+                  variantSlug: i.variantSlug,
+                  qty: i.qty,
+                })),
+              },
+              source: "system",
+            });
+            await recordServerFunnelEvent(
+              req,
+              "checkout_stock_failure",
+              {
+                skuId: err.skuId,
+                variantSlug: err.variantSlug ?? "",
+                reason: err.code,
+              },
+              { path: "/checkout" },
+            );
+          } catch {
+            // telemetry must never fail response
+          }
+        });
+        return NextResponse.json(
+          {
+            error: conflictMsg,
+            code: err.code,
+            failedSkuId: err.skuId,
+            failedVariantSlug: err.variantSlug,
+            availableQty: err.availableQty,
+          },
+          { status: 409 },
+        );
       }
       const message = err instanceof Error ? err.message : String(err);
       if (message.startsWith("COUPON:")) {

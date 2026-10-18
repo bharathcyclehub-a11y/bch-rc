@@ -17,6 +17,8 @@ import {
   Tag,
   Truck,
   X,
+  AlertTriangle,
+  ArrowRightLeft,
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { AnnouncementBar } from "@/components/AnnouncementBar";
@@ -29,6 +31,13 @@ import {
   getCartSubtotal,
   getCartCount,
 } from "@/lib/cart-store";
+import { PRODUCTS, defaultVariantSlug } from "@/lib/products";
+import {
+  resolveVariantAvailability,
+  resolveProductAvailability,
+  findComparableAlternatives,
+} from "@/lib/availability";
+import { useLiveStock } from "@/lib/use-live-stock";
 import {
   AUTO_COUPON,
   COD_CONFIRMATION_16_MAX_INR,
@@ -215,8 +224,10 @@ function CheckoutPageInner() {
   const hyd16 = useCart16((s) => s.hasHydrated);
   const hasHydrated = is16 ? hyd16 : hyd64;
 
-  const lines = getCartLines(items);
-  const subtotal = getCartSubtotal(items);
+  const { stockMap, overrideMap, refresh: refreshStock } = useLiveStock();
+
+  const lines = getCartLines(items, overrideMap);
+  const subtotal = getCartSubtotal(items, overrideMap);
   const count = getCartCount(items);
 
   const [name, setName] = useState("");
@@ -249,11 +260,6 @@ function CheckoutPageInner() {
   // True when the applied coupon is a "Name your price" bargain — the negotiated
   // FINAL price, which does NOT stack with the prepaid/bundle discounts.
   const [couponIsBargain, setCouponIsBargain] = useState(false);
-  // Signature (`code|subtotal`) of the inputs last validated against the coupon
-  // service. Applying a coupon sets `couponApplied`, which would otherwise make
-  // the revalidate effect refire an identical /api/coupons/validate for inputs
-  // we just checked. Recording the validated signature lets that effect skip the
-  // redundant call and only fire when the subtotal genuinely changes later.
   const lastCouponValidation = useRef<string | null>(null);
 
   // Geo-locate / auto-fill state
@@ -261,21 +267,12 @@ function CheckoutPageInner() {
   const [geoStatus, setGeoStatus] = useState<string | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
 
-  // Touch-device detection. Desktop browsers' navigator.geolocation falls back
-  // to IP-based location (often 5-50 km off in India), so the GPS button is
-  // useless and misleading there. We surface a hint instead. Mobile + tablets
-  // (pointer: coarse) still get the button.
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) return;
     setIsTouchDevice(window.matchMedia("(pointer: coarse)").matches);
   }, []);
 
-  // GA4/Meta InitiateCheckout — fire once on mount when the cart has
-  // something to spend. Subtotal is the most honest "value" Meta can use
-  // for ad auction bidding at this stage (fees and bonus haven't been
-  // chosen yet). Dedup vs the PDP buyNow() event by event_id (analytics
-  // helper generates a fresh UUID per fire; Meta dedups its side).
   const beganCheckoutRef = useRef(false);
   useEffect(() => {
     if (beganCheckoutRef.current || subtotal <= 0) return;
@@ -287,14 +284,8 @@ function CheckoutPageInner() {
       cartValueInr: subtotal,
       itemCount: getCartCount(items),
     });
-  }, [subtotal]);
+  }, [subtotal, items]);
 
-  // Provenance tracking: which address fields did the buyer type vs. which
-  // did we autofill? Critical for the "user corrects a wrong GPS pincode"
-  // flow — when the buyer manually fixes the pincode, our pincode-lookup
-  // must be allowed to overwrite the city/state/area we previously
-  // auto-populated from the wrong location. But it must NOT overwrite a
-  // field the buyer typed in themselves.
   const userTypedRef = useRef({
     pincode: false,
     line1: false,
@@ -304,38 +295,27 @@ function CheckoutPageInner() {
   });
   const pincodeInputRef = useRef<HTMLInputElement>(null);
 
-  // Live pincode serviceability (delivery ETA + COD availability). Previewed
-  // here; the server re-checks authoritatively at order create.
   const [svc, setSvc] = useState<Serviceability | null>(null);
-  // Only trust the serviceability result while a full pincode is present, so a
-  // result for an old pincode can't linger after the buyer edits it.
   const svcActive = pincode.length === 6 ? svc : null;
 
-  // Inline-validation: which fields the buyer has touched (so we don't shout
-  // errors before they've typed). Submit marks all as touched.
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const markTouched = (f: string) =>
     setTouched((t) => (t[f] ? t : { ...t, [f]: true }));
 
-  // Razorpay cancellation / failure recovery. When the modal is dismissed or
-  // payment fails, we keep the cart + order and surface a clear retry.
   const [paymentCancelled, setPaymentCancelled] = useState<string | null>(null);
 
-  // Whether the auto-coupon has already been attempted this session, so we
-  // don't refire it after the buyer deliberately removes it.
   const autoCouponTried = useRef(false);
-
-  // Whether we've already applied a bargain-won code from ?bg= (see effect below).
   const bgCouponTried = useRef(false);
 
-  // Idempotency key — generated ONCE per checkout session. Same key on retry
-  // → server short-circuits and returns the original order. Cleared after a
-  // successful order so a fresh "Buy again" cycle starts a new key.
-  const idempotencyKey = useMemo(() => nanoid(24), []);
+  // Idempotency key — stable for retries of the same cart + payment method + coupon,
+  // but rotates automatically if the buyer changes cart items, payment method, or coupon.
+  const cartFingerprint = useMemo(
+    () => JSON.stringify({ items, payment, couponApplied }),
+    [items, payment, couponApplied],
+  );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const idempotencyKey = useMemo(() => nanoid(24), [cartFingerprint]);
   const submittingRef = useRef(false);
-  // Set the instant Razorpay confirms payment — stops the modal's ondismiss
-  // (which fires right after success) from re-enabling the button and allowing
-  // a duplicate submit / double charge.
   const paidRef = useRef(false);
 
   useEffect(() => {
@@ -524,38 +504,47 @@ function CheckoutPageInner() {
   const bundleDiscount = bundleDiscountInr(count, subtotal);
   const bundleLabel = bundleTierLabel(count);
   // Bargain price is FINAL: a bargain coupon does NOT stack with the prepaid or
-  // bundle discounts, so the buyer pays exactly what they negotiated. Normal
-  // coupons keep stacking exactly as before (bargainActive is false for them).
-  // The server enforces the same rule in /api/orders/create — this only keeps the
-  // displayed total honest.
-  const bargainActive = couponIsBargain && couponDiscountInr > 0;
+  // bundle discounts, EXCEPT it must never charge the customer MORE than the
+  // standard auto-applied discounts (matching src/lib/pricing.ts & orders/create).
+  const standardDiscounts = prepaidDiscount + bundleDiscount;
+  const bargainActive =
+    couponIsBargain &&
+    couponDiscountInr > 0 &&
+    couponDiscountInr >= standardDiscounts;
   const effPrepaidDiscount = bargainActive ? 0 : prepaidDiscount;
   const effBundleDiscount = bargainActive ? 0 : bundleDiscount;
+  const effCouponDiscount =
+    couponIsBargain && !bargainActive ? 0 : couponDiscountInr;
   const total = Math.max(
     0,
-    subtotal + shipping + codFee - effPrepaidDiscount - effBundleDiscount - couponDiscountInr,
+    subtotal + shipping + codFee - effPrepaidDiscount - effBundleDiscount - effCouponDiscount,
   );
 
-  // No-Cost EMI — a prepaid card charge. The amount financed is the same online
-  // total a UPI buyer would pay (full ₹100-off prepaid total, no COD fee). The
-  // Razorpay modal exposes the bank/tenure picker; we only surface the "from
-  // ₹X/mo" hook + a selectable option so buyers KNOW EMI exists (Amazon-style).
-  // Gated on EMI.minInr so it never shows below the bank EMI floor (~₹3,000).
+  // Check if any line in the cart currently has a verified stock conflict
+  const hasStockConflict = Boolean(
+    stockMap &&
+      lines.some((l) => {
+        const vAvail = resolveVariantAvailability(
+          l.sku,
+          l.variantSlug,
+          stockMap,
+          overrideMap[l.sku.id],
+        );
+        return !vAvail.purchasable || l.qty > vAvail.availableQty;
+      }),
+  );
+
   const emiTotal = Math.max(
     0,
-    subtotal + shipping - (bargainActive ? 0 : OFFERS.prepaidDiscountINR) - effBundleDiscount - couponDiscountInr,
+    subtotal + shipping - (bargainActive ? 0 : OFFERS.prepaidDiscountINR) - effBundleDiscount - effCouponDiscount,
   );
   const emiMonthly = emiMonthlyInr(emiTotal);
   const emiEligible = emiMonthly > 0;
 
-  // If the cart drops below the EMI floor while EMI is selected, fall back to UPI
-  // so the buyer isn't stuck on an option that no longer applies.
   useEffect(() => {
     if (!emiEligible) setPayment((p) => (p === "emi" ? "upi" : p));
   }, [emiEligible]);
 
-  // Per-field validity, recomputed live. Drives both the inline red borders /
-  // messages and the submit gate.
   const fieldErrors = useMemo(() => {
     const e: Record<string, string> = {};
     if (name.trim().length < 2) e.name = "Enter your full name.";
@@ -572,6 +561,9 @@ function CheckoutPageInner() {
   const FIELD_ORDER = ["name", "phone", "email", "pincode", "line1", "city", "stateName"];
 
   function validate(): string | null {
+    if (hasStockConflict) {
+      return "An item in your cart is out of stock or exceeds available inventory. Please update or swap it above.";
+    }
     for (const f of FIELD_ORDER) if (fieldErrors[f]) return fieldErrors[f];
     if (svcActive && !svcActive.serviceable)
       return svcActive.reason ?? "We don't deliver to this pincode yet.";
@@ -943,28 +935,26 @@ function CheckoutPageInner() {
           couponCode: couponApplied || undefined,
         }),
       });
-      const data = (await res.json()) as CreateOrderResponse & { error?: string };
+      const data = (await res.json()) as CreateOrderResponse & {
+        error?: string;
+        code?: string;
+        failedSkuId?: string;
+        failedVariantSlug?: string | null;
+        availableQty?: number;
+      };
       if (!res.ok) {
+        if (res.status === 409) {
+          await refreshStock();
+        }
         throw new Error(data.error || "Failed to create order");
       }
 
-      // NOTE: `order_submitted` is now fired SERVER-SIDE from /api/orders/create
-      // so it captures 100% of orders (incl. COD / ad-blocked / navigated-away).
-      // Firing it here too would double-count — intentionally omitted.
-
-      // Both UPI (full prepaid) and CoD (partial-prepaid confirmation fee)
-      // now hand off to Razorpay. The CoD flow charges the upfront
-      // confirmation fee; courier collects the rest at the door. Only the
-      // legacy zero-confirmation-fee fallback skips Razorpay and lands at
-      // the order page — that branch fires only on a server-side misconfig.
       if (data.paymentMethod === "COD" && !data.razorpayOrderId) {
         cartApi.getState().clear();
         router.push(`/orders/${data.orderId}`);
         return;
       }
 
-      // Hand off to the Razorpay modal. Drop the button spinner (the modal is
-      // now the foreground) but keep submittingRef set until the modal resolves.
       setLoading(false);
       openRazorpay(data);
     } catch (err) {
@@ -1259,8 +1249,7 @@ function CheckoutPageInner() {
             </div>
           </div>
 
-          {step === "details" && (
-          <>
+          {(step === "details" || hasStockConflict) && (
           <div className="mt-6 bg-white rounded-2xl border border-brand-line p-5">
             <div className="flex justify-between items-baseline">
               <div className="font-semibold text-brand-ink">Order summary</div>
@@ -1269,79 +1258,253 @@ function CheckoutPageInner() {
               </div>
             </div>
 
-            {/* Per-line: thumbnail + name + qty stepper + remove + line total.
-                Buyers can fix mistakes ('I meant 1, not 2') without bouncing
-                back to the cart drawer — a top reason for checkout abandonment
-                on long-scroll mobile pages. */}
             <ul className="mt-4 space-y-3">
               {lines.map((l) => {
+                const ov = overrideMap[l.sku.id];
+                const vAvail = resolveVariantAvailability(
+                  l.sku,
+                  l.variantSlug,
+                  stockMap,
+                  ov,
+                );
+                const pAvail = resolveProductAvailability(
+                  l.sku,
+                  stockMap,
+                  ov,
+                );
+                const isSoldOut = Boolean(stockMap && !vAvail.purchasable);
+                const isOverQty = Boolean(
+                  stockMap && vAvail.purchasable && l.qty > vAvail.availableQty,
+                );
+                const alternateColor =
+                  isSoldOut && pAvail.firstInStockVariantSlug
+                    ? l.sku.colors?.find(
+                        (c) => c.slug === pAvail.firstInStockVariantSlug,
+                      )
+                    : undefined;
+                const comparableSku =
+                  isSoldOut && !alternateColor
+                    ? findComparableAlternatives(
+                        l.sku,
+                        PRODUCTS,
+                        stockMap,
+                        overrideMap,
+                        1,
+                      )[0]
+                    : undefined;
+
                 const dec = () =>
-                  cartApi.getState().setQty(l.sku.id, l.variantSlug, l.qty - 1);
+                  cartApi
+                    .getState()
+                    .setQty(
+                      l.sku.id,
+                      l.variantSlug,
+                      l.qty - 1,
+                      vAvail.maxOrderQty || 10,
+                    );
                 const inc = () =>
-                  cartApi.getState().setQty(l.sku.id, l.variantSlug, l.qty + 1);
+                  cartApi
+                    .getState()
+                    .setQty(
+                      l.sku.id,
+                      l.variantSlug,
+                      l.qty + 1,
+                      vAvail.maxOrderQty || 10,
+                    );
                 const rm = () =>
                   cartApi.getState().remove(l.sku.id, l.variantSlug);
                 const labelSuffix = l.variantName ? ` (${l.variantName})` : "";
                 return (
                   <li
                     key={`${l.sku.id}-${l.variantSlug ?? "default"}`}
-                    className="flex items-center gap-3 border-t border-brand-line pt-3 first:border-t-0 first:pt-0"
+                    className="flex flex-col gap-2 border-t border-brand-line pt-3 first:border-t-0 first:pt-0"
                   >
-                    <div className="relative w-14 h-14 sm:w-16 sm:h-16 shrink-0 rounded-lg overflow-hidden bg-brand-cream border border-brand-line">
-                      <Image
-                        src={l.variantImage ?? l.sku.heroImage}
-                        alt={l.sku.name + labelSuffix}
-                        fill
-                        sizes="64px"
-                        className="object-cover"
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-semibold text-brand-ink text-sm leading-tight truncate">
-                        {l.sku.name}
-                        {l.variantName ? (
-                          <span className="text-brand-ink-soft font-normal"> · {l.variantName}</span>
-                        ) : null}
+                    <div className="flex items-center gap-3">
+                      <div className="relative w-14 h-14 sm:w-16 sm:h-16 shrink-0 rounded-lg overflow-hidden bg-brand-cream border border-brand-line">
+                        <Image
+                          src={l.variantImage ?? l.sku.heroImage}
+                          alt={l.sku.name + labelSuffix}
+                          fill
+                          sizes="64px"
+                          className={`object-cover ${
+                            isSoldOut ? "opacity-50 grayscale-[35%]" : ""
+                          }`}
+                        />
                       </div>
-                      <div className="text-xs text-brand-ink-soft mt-0.5">
-                        {l.sku.scale} · {formatINR(l.unitPriceINR)} each
+                      <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-brand-ink text-sm leading-tight truncate flex items-center gap-1.5">
+                          <span className="truncate">
+                            {l.sku.name}
+                            {l.variantName ? (
+                              <span className="text-brand-ink-soft font-normal">
+                                {" "}
+                                · {l.variantName}
+                              </span>
+                            ) : null}
+                          </span>
+                          {isSoldOut && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-brand-red text-white text-[10px] font-bold uppercase tracking-wide shrink-0">
+                              SOLD OUT
+                            </span>
+                          )}
+                          {!isSoldOut && vAvail.status === "LOW_STOCK" && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0">
+                              Only {vAvail.availableQty} left
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-brand-ink-soft mt-0.5">
+                          {l.sku.scale} · {formatINR(l.unitPriceINR)} each
+                        </div>
+                        <div className="mt-2 inline-flex items-center border border-brand-line rounded-full overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={dec}
+                            aria-label={`Decrease ${l.sku.name}${labelSuffix} quantity`}
+                            className="h-11 w-11 flex items-center justify-center text-brand-ink hover:bg-brand-cream disabled:text-brand-ink-soft"
+                            disabled={l.qty <= 1}
+                          >
+                            <Minus size={14} aria-hidden />
+                          </button>
+                          <span className="px-2 min-w-[1.5rem] text-center text-sm font-semibold tabular-nums text-brand-ink">
+                            {l.qty}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={inc}
+                            disabled={
+                              isSoldOut ||
+                              (vAvail.stockKnown && l.qty >= vAvail.maxOrderQty)
+                            }
+                            aria-label={`Increase ${l.sku.name}${labelSuffix} quantity`}
+                            className="h-11 w-11 flex items-center justify-center text-brand-ink hover:bg-brand-cream disabled:opacity-35 disabled:cursor-not-allowed"
+                          >
+                            <Plus size={14} aria-hidden />
+                          </button>
+                        </div>
                       </div>
-                      <div className="mt-2 inline-flex items-center border border-brand-line rounded-full overflow-hidden">
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        <div className="text-sm font-semibold text-brand-ink">
+                          {formatINR(l.lineTotalINR)}
+                        </div>
                         <button
                           type="button"
-                          onClick={dec}
-                          aria-label={`Decrease ${l.sku.name}${labelSuffix} quantity`}
-                          className="h-11 w-11 flex items-center justify-center text-brand-ink hover:bg-brand-cream disabled:text-brand-ink-soft"
-                          disabled={l.qty <= 1}
+                          onClick={rm}
+                          aria-label={`Remove ${l.sku.name}${labelSuffix} from cart`}
+                          className="h-11 w-11 flex items-center justify-center text-brand-ink-soft hover:text-brand-red"
                         >
-                          <Minus size={14} aria-hidden />
+                          <X size={16} aria-hidden />
                         </button>
-                        <span className="px-2 min-w-[1.5rem] text-center text-sm font-semibold tabular-nums text-brand-ink">
-                          {l.qty}
+                      </div>
+                    </div>
+
+                    {isOverQty && (
+                      <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900 flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle size={13} className="shrink-0" />
+                          Only {vAvail.availableQty} left in stock
                         </span>
                         <button
                           type="button"
-                          onClick={inc}
-                          aria-label={`Increase ${l.sku.name}${labelSuffix} quantity`}
-                          className="h-11 w-11 flex items-center justify-center text-brand-ink hover:bg-brand-cream"
+                          onClick={() => {
+                            cartApi
+                              .getState()
+                              .setQty(
+                                l.sku.id,
+                                l.variantSlug,
+                                vAvail.availableQty,
+                                vAvail.availableQty,
+                              );
+                            setError(null);
+                          }}
+                          className="font-bold underline hover:no-underline shrink-0"
                         >
-                          <Plus size={14} aria-hidden />
+                          Reduce to {vAvail.availableQty}
                         </button>
                       </div>
-                    </div>
-                    <div className="flex flex-col items-end gap-2 shrink-0">
-                      <div className="text-sm font-semibold text-brand-ink">
-                        {formatINR(l.lineTotalINR)}
+                    )}
+
+                    {isSoldOut && (
+                      <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2.5 text-xs text-red-900 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">
+                            This item is currently out of stock. Other items in
+                            your cart remain untouched.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              rm();
+                              setError(null);
+                            }}
+                            className="font-semibold underline shrink-0"
+                          >
+                            Remove item
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {alternateColor && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                trackFunnel("alternative_click", {
+                                  skuId: l.sku.id,
+                                  targetSkuId: l.sku.id,
+                                  variantSlug: alternateColor.slug,
+                                  placement: "checkout",
+                                });
+                                cartApi
+                                  .getState()
+                                  .replaceItem(
+                                    l.sku.id,
+                                    l.variantSlug,
+                                    l.sku.id,
+                                    alternateColor.slug,
+                                    1,
+                                  );
+                                setError(null);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-red-200 text-brand-ink font-semibold hover:bg-brand-cream transition-colors"
+                            >
+                              <ArrowRightLeft size={12} />
+                              Switch to {alternateColor.name} (In stock)
+                            </button>
+                          )}
+                          {!alternateColor && comparableSku && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const targetVariant = defaultVariantSlug(
+                                  comparableSku,
+                                  stockMap,
+                                );
+                                trackFunnel("alternative_click", {
+                                  skuId: l.sku.id,
+                                  targetSkuId: comparableSku.id,
+                                  variantSlug: targetVariant ?? "",
+                                  placement: "checkout",
+                                });
+                                cartApi
+                                  .getState()
+                                  .replaceItem(
+                                    l.sku.id,
+                                    l.variantSlug,
+                                    comparableSku.id,
+                                    targetVariant,
+                                    1,
+                                  );
+                                setError(null);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-red-200 text-brand-ink font-semibold hover:bg-brand-cream transition-colors"
+                            >
+                              <ArrowRightLeft size={12} />
+                              Swap with {comparableSku.name} (
+                              {formatINR(comparableSku.retailINR)})
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={rm}
-                        aria-label={`Remove ${l.sku.name}${labelSuffix} from cart`}
-                        className="h-11 w-11 flex items-center justify-center text-brand-ink-soft hover:text-brand-red"
-                      >
-                        <X size={16} aria-hidden />
-                      </button>
-                    </div>
+                    )}
                   </li>
                 );
               })}
@@ -1354,7 +1517,10 @@ function CheckoutPageInner() {
               </span>
             </div>
           </div>
+          )}
 
+          {step === "details" && (
+          <>
           <div className="mt-6 bg-white rounded-2xl border border-brand-line p-5">
             <h2 className="font-semibold text-brand-ink">
               Where should we ship?

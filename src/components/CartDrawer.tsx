@@ -13,6 +13,8 @@ import {
   Gift,
   PartyPopper,
   Sparkles,
+  AlertTriangle,
+  ArrowRightLeft,
 } from "lucide-react";
 import {
   useCart,
@@ -27,27 +29,39 @@ import {
   bundleDiscountInr,
   bundleDiscountPct,
 } from "@/lib/config";
+import { PRODUCTS, defaultVariantSlug } from "@/lib/products";
+import {
+  resolveVariantAvailability,
+  resolveProductAvailability,
+  findComparableAlternatives,
+} from "@/lib/availability";
+import { useLiveStock } from "@/lib/use-live-stock";
 import { formatINR } from "@/lib/utils";
 import { trackFunnel } from "@/lib/funnel-client";
 
 export default function CartDrawer({
   initialOpen = false,
-}: { initialOpen?: boolean }) {
+}: {
+  initialOpen?: boolean;
+}) {
   const items = useCart((s) => s.items);
   const isOpen = useCart((s) => s.isOpen);
   const close = useCart((s) => s.close);
   const open = useCart((s) => s.open);
   const setQty = useCart((s) => s.setQty);
   const remove = useCart((s) => s.remove);
+  const replaceItem = useCart((s) => s.replaceItem);
 
-  const lines = getCartLines(items);
-  const subtotal = getCartSubtotal(items);
+  const { stockMap, overrideMap, refresh } = useLiveStock();
+
+  const lines = getCartLines(items, overrideMap);
+  const subtotal = getCartSubtotal(items, overrideMap);
   const count = getCartCount(items);
 
-  // Funnel: `view_cart` fires once each time the drawer opens (this stage had
-  // no instrumentation before, so it always read empty on the funnel chart).
+  // Revalidate live stock whenever the cart drawer opens
   useEffect(() => {
     if (!isOpen) return;
+    refresh();
     trackFunnel("view_cart", { cartValueInr: subtotal, itemCount: count });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
@@ -57,17 +71,25 @@ export default function CartDrawer({
     100,
     (subtotal / OFFERS.freeShippingMinINR) * 100,
   );
-  // Bundle bonus nudge — show the current tier the buyer has unlocked, and
-  // how much MORE they'd save by hitting the next tier. The tiers list is
-  // sorted ascending so we can peek "the next tier above current" by index.
   const currentBundleBonus = bundleDiscountInr(count, subtotal);
   const nextTier = BUNDLE_TIERS.find((t) => t.minQty > count);
   const bundleGap = nextTier ? nextTier.minQty - count : 0;
-  // The bundle discount is now a straight percentage of the subtotal, so the
-  // badge reads it directly off the tier. The exact ₹ amount still shows on
-  // the receipt + checkout summary for accounting clarity.
   const currentBundlePct = bundleDiscountPct(count);
   const nextTierPct = nextTier ? nextTier.pct : 0;
+
+  // Check if any cart line has a verified stock conflict
+  const hasStockConflict = Boolean(
+    stockMap &&
+      lines.some((line) => {
+        const vAvail = resolveVariantAvailability(
+          line.sku,
+          line.variantSlug,
+          stockMap,
+          overrideMap[line.sku.id],
+        );
+        return !vAvail.purchasable || line.qty > vAvail.availableQty;
+      }),
+  );
 
   // Open from ?openCart=1 query param on first mount.
   const initialOpenAppliedRef = useRef(false);
@@ -172,14 +194,8 @@ export default function CartDrawer({
               </button>
             </header>
 
-            {/* Single status card — free-shipping + bundle bonus stacked
-                as two rows inside one container instead of two separate
-                pill-style banners, which read as visual noise. Each row is
-                a self-contained line; rows are dividers, not separate
-                cards, so the whole strip feels like one progress widget. */}
             {count > 0 && (
               <div className="mx-5 my-3 rounded-xl border border-brand-line bg-white/60 backdrop-blur-sm overflow-hidden text-sm">
-                {/* Free-shipping row */}
                 <div
                   className={
                     delta > 0
@@ -219,9 +235,6 @@ export default function CartDrawer({
                   )}
                 </div>
 
-                {/* Bundle bonus row — only renders when the buyer has either
-                    unlocked a tier OR is one car away from the next one, so
-                    we don't add empty space to a single-item cart. */}
                 {(currentBundleBonus > 0 || (bundleGap > 0 && nextTier)) && (
                   <div
                     className={
@@ -234,9 +247,7 @@ export default function CartDrawer({
                       <div className="flex items-center justify-between gap-2">
                         <span className="flex items-center gap-2 min-w-0">
                           <Gift size={14} className="shrink-0" aria-hidden />
-                          <span className="truncate">
-                            Bundle bonus applied
-                          </span>
+                          <span className="truncate">Bundle bonus applied</span>
                         </span>
                         <span className="text-[13px] font-bold tabular-nums shrink-0">
                           −{currentBundlePct}%
@@ -284,81 +295,248 @@ export default function CartDrawer({
                 </div>
               ) : (
                 <ul className="divide-y divide-brand-line">
-                  {lines.map((line) => (
-                    <li
-                      key={`${line.sku.id}-${line.variantSlug ?? "default"}`}
-                      className="flex gap-3 py-3.5"
-                    >
-                      <div className="w-16 h-16 rounded-lg bg-brand-cream relative overflow-hidden flex-shrink-0">
-                        <Image
-                          src={line.variantImage ?? line.sku.heroImage}
-                          alt={
-                            line.sku.name +
-                            (line.variantName ? ` (${line.variantName})` : "")
-                          }
-                          fill
-                          sizes="64px"
-                          className="object-contain p-1.5"
-                        />
-                      </div>
-                      <div className="flex-1 min-w-0 flex flex-col justify-between">
-                        {/* Top row: name + line total */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="font-semibold text-brand-ink text-sm leading-tight truncate">
-                              {line.sku.name}
-                            </div>
-                            <div className="text-[11px] text-brand-ink-soft mt-0.5 truncate">
-                              {line.sku.scale}
-                              {line.variantName ? ` · ${line.variantName}` : ""}
-                            </div>
+                  {lines.map((line) => {
+                    const ov = overrideMap[line.sku.id];
+                    const vAvail = resolveVariantAvailability(
+                      line.sku,
+                      line.variantSlug,
+                      stockMap,
+                      ov,
+                    );
+                    const pAvail = resolveProductAvailability(
+                      line.sku,
+                      stockMap,
+                      ov,
+                    );
+                    const isSoldOut = stockMap && !vAvail.purchasable;
+                    const isOverQty =
+                      stockMap &&
+                      vAvail.purchasable &&
+                      line.qty > vAvail.availableQty;
+
+                    // Find an in-stock colour of the same SKU, or a comparable in-stock SKU
+                    const alternateColor =
+                      isSoldOut && pAvail.firstInStockVariantSlug
+                        ? line.sku.colors?.find(
+                            (c) => c.slug === pAvail.firstInStockVariantSlug,
+                          )
+                        : undefined;
+                    const comparableSku =
+                      isSoldOut && !alternateColor
+                        ? findComparableAlternatives(
+                            line.sku,
+                            PRODUCTS,
+                            stockMap,
+                            overrideMap,
+                            1,
+                          )[0]
+                        : undefined;
+
+                    return (
+                      <li
+                        key={`${line.sku.id}-${line.variantSlug ?? "default"}`}
+                        className="flex flex-col gap-2 py-3.5"
+                      >
+                        <div className="flex gap-3">
+                          <div className="w-16 h-16 rounded-lg bg-brand-cream relative overflow-hidden flex-shrink-0">
+                            <Image
+                              src={line.variantImage ?? line.sku.heroImage}
+                              alt={
+                                line.sku.name +
+                                (line.variantName ? ` (${line.variantName})` : "")
+                              }
+                              fill
+                              sizes="64px"
+                              className={`object-contain p-1.5 ${
+                                isSoldOut ? "opacity-50 grayscale-[35%]" : ""
+                              }`}
+                            />
                           </div>
-                          <div className="font-bold text-brand-ink text-sm tabular-nums whitespace-nowrap">
-                            {formatINR(line.lineTotalINR)}
+                          <div className="flex-1 min-w-0 flex flex-col justify-between">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="font-semibold text-brand-ink text-sm leading-tight truncate">
+                                  {line.sku.name}
+                                </div>
+                                <div className="text-[11px] text-brand-ink-soft mt-0.5 truncate flex items-center gap-1.5">
+                                  <span>
+                                    {line.sku.scale}
+                                    {line.variantName
+                                      ? ` · ${line.variantName}`
+                                      : ""}
+                                  </span>
+                                  {isSoldOut && (
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-brand-red text-white text-[10px] font-bold uppercase tracking-wide">
+                                      SOLD OUT
+                                    </span>
+                                  )}
+                                  {!isSoldOut &&
+                                    vAvail.status === "LOW_STOCK" && (
+                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold">
+                                        Only {vAvail.availableQty} left
+                                      </span>
+                                    )}
+                                </div>
+                              </div>
+                              <div className="font-bold text-brand-ink text-sm tabular-nums whitespace-nowrap">
+                                {formatINR(line.lineTotalINR)}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 mt-2">
+                              <div className="inline-flex items-center border border-brand-line rounded-full overflow-hidden bg-white">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setQty(
+                                      line.sku.id,
+                                      line.variantSlug,
+                                      line.qty - 1,
+                                      vAvail.maxOrderQty || 10,
+                                    )
+                                  }
+                                  aria-label="Decrease quantity"
+                                  className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:bg-brand-cream active:bg-brand-line transition-colors"
+                                >
+                                  <Minus size={13} />
+                                </button>
+                                <span className="px-2.5 text-[13px] font-semibold tabular-nums text-brand-ink min-w-[28px] text-center">
+                                  {line.qty}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={
+                                    Boolean(isSoldOut) ||
+                                    (vAvail.stockKnown &&
+                                      line.qty >= vAvail.maxOrderQty)
+                                  }
+                                  onClick={() =>
+                                    setQty(
+                                      line.sku.id,
+                                      line.variantSlug,
+                                      line.qty + 1,
+                                      vAvail.maxOrderQty || 10,
+                                    )
+                                  }
+                                  aria-label="Increase quantity"
+                                  className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:bg-brand-cream active:bg-brand-line disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  <Plus size={13} />
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  remove(line.sku.id, line.variantSlug)
+                                }
+                                aria-label={`Remove ${line.sku.name}`}
+                                className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:text-brand-red rounded-full hover:bg-brand-red-soft transition-colors"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
                           </div>
                         </div>
 
-                        {/* Bottom row: stepper + trash, horizontally aligned
-                            so the line item is two compact rows instead of
-                            five stacked elements. */}
-                        <div className="flex items-center justify-between gap-2 mt-2">
-                          <div className="inline-flex items-center border border-brand-line rounded-full overflow-hidden bg-white">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setQty(line.sku.id, line.variantSlug, line.qty - 1)
-                              }
-                              aria-label="Decrease quantity"
-                              className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:bg-brand-cream active:bg-brand-line transition-colors"
-                            >
-                              <Minus size={13} />
-                            </button>
-                            <span className="px-2.5 text-[13px] font-semibold tabular-nums text-brand-ink min-w-[28px] text-center">
-                              {line.qty}
+                        {/* Contextual resolution actions when line is OOS or over available stock */}
+                        {isOverQty && (
+                          <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900 flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5">
+                              <AlertTriangle size={13} className="shrink-0" />
+                              Only {vAvail.availableQty} available in stock
                             </span>
                             <button
                               type="button"
                               onClick={() =>
-                                setQty(line.sku.id, line.variantSlug, line.qty + 1)
+                                setQty(
+                                  line.sku.id,
+                                  line.variantSlug,
+                                  vAvail.availableQty,
+                                  vAvail.availableQty,
+                                )
                               }
-                              aria-label="Increase quantity"
-                              className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:bg-brand-cream active:bg-brand-line transition-colors"
+                              className="font-bold underline hover:no-underline shrink-0"
                             >
-                              <Plus size={13} />
+                              Set to {vAvail.availableQty}
                             </button>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => remove(line.sku.id, line.variantSlug)}
-                            aria-label={`Remove ${line.sku.name}`}
-                            className="h-8 w-8 flex items-center justify-center text-brand-ink-soft hover:text-brand-red rounded-full hover:bg-brand-red-soft transition-colors"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </div>
-                    </li>
-                  ))}
+                        )}
+
+                        {isSoldOut && (
+                          <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-900 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium">
+                                This item just went out of stock. Other items in
+                                your cart are safe.
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  remove(line.sku.id, line.variantSlug)
+                                }
+                                className="text-[11px] font-semibold underline shrink-0"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            {alternateColor && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  trackFunnel("alternative_click", {
+                                    skuId: line.sku.id,
+                                    targetSkuId: line.sku.id,
+                                    variantSlug: alternateColor.slug,
+                                    placement: "cart_drawer",
+                                  });
+                                  replaceItem(
+                                    line.sku.id,
+                                    line.variantSlug,
+                                    line.sku.id,
+                                    alternateColor.slug,
+                                    1,
+                                  );
+                                }}
+                                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white border border-red-200 text-brand-ink font-semibold hover:bg-brand-cream transition-colors"
+                              >
+                                <ArrowRightLeft size={12} />
+                                Switch to {alternateColor.name} (In stock)
+                              </button>
+                            )}
+                            {!alternateColor && comparableSku && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const targetVariant = defaultVariantSlug(
+                                    comparableSku,
+                                    stockMap,
+                                  );
+                                  trackFunnel("alternative_click", {
+                                    skuId: line.sku.id,
+                                    targetSkuId: comparableSku.id,
+                                    variantSlug: targetVariant ?? "",
+                                    placement: "cart_drawer",
+                                  });
+                                  replaceItem(
+                                    line.sku.id,
+                                    line.variantSlug,
+                                    comparableSku.id,
+                                    targetVariant,
+                                    1,
+                                  );
+                                }}
+                                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white border border-red-200 text-brand-ink font-semibold hover:bg-brand-cream transition-colors"
+                              >
+                                <ArrowRightLeft size={12} />
+                                Swap with {comparableSku.name} (
+                                {formatINR(comparableSku.retailINR)})
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -391,18 +569,26 @@ export default function CartDrawer({
                 <p className="text-[11px] text-brand-ink-soft -mt-1">
                   Shipping &amp; taxes calculated at checkout
                 </p>
-                <Link
-                  href="/checkout"
-                  onClick={close}
-                  aria-disabled={subtotal === 0}
-                  className={
-                    subtotal === 0
-                      ? "bg-brand-red/50 text-white py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 pointer-events-none"
-                      : "bg-brand-red hover:bg-brand-red-hover text-white py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2"
-                  }
-                >
-                  Checkout · {formatINR(Math.max(0, subtotal - currentBundleBonus))}
-                </Link>
+                {hasStockConflict ? (
+                  <div className="rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-2.5 text-xs font-medium text-amber-900 text-center">
+                    Please update or swap the unavailable item above to proceed
+                    to checkout.
+                  </div>
+                ) : (
+                  <Link
+                    href="/checkout"
+                    onClick={close}
+                    aria-disabled={subtotal === 0}
+                    className={
+                      subtotal === 0
+                        ? "bg-brand-red/50 text-white py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 pointer-events-none"
+                        : "bg-brand-red hover:bg-brand-red-hover text-white py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2"
+                    }
+                  >
+                    Checkout ·{" "}
+                    {formatINR(Math.max(0, subtotal - currentBundleBonus))}
+                  </Link>
+                )}
               </div>
             )}
           </motion.aside>

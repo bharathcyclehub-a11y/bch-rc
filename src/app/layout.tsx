@@ -9,14 +9,12 @@ import BargainLauncher from "@/components/BargainLauncher";
 export const metadata: Metadata = {
   metadataBase: new URL("https://pocketrccars.com"),
   title: {
-    default: "Mini RC Cars from ₹999 — RC Drift Cars | PRC Cars",
-    template: "%s | PRC Cars",
-  },
-  alternates: {
-    canonical: "/",
+    default:
+      "Pocket RC Cars India — Mini 1:64, 1:16 Drift, Construction & Hobby Grade RC Cars",
+    template: "%s | Pocket RC Cars",
   },
   description:
-    "Pocket RC drift cars from ₹999 — mini 1:64 die-cast RC cars with LED, drift wheels & USB-C. Gift-ready pocket cars, Pan-India COD, ships 24 hrs from Bangalore.",
+    "Buy RC cars online in India from ₹999 — 1:64 & 1:43 mini RC cars, 1:16 4WD smoke drift cars, RC construction vehicles & 4WD hobby-grade rock crawlers. Ships in 24 hrs from Bangalore.",
   keywords: [
     "RC car India",
     "mini RC drift car",
