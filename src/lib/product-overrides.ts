@@ -10,7 +10,7 @@
  * the order-create pricing seam) reads the SAME merged value.
  */
 
-import { inArray, eq } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { productOverrides } from "@/db/schema";
 import type { Sku } from "@/lib/products";
@@ -48,8 +48,20 @@ function isMissingColumnError(err: unknown): boolean {
   return msg.includes("column") && msg.includes("does not exist");
 }
 
-/** All overrides (optionally site-scoped), keyed by SKU id. Empty on any error. */
-export async function getOverrideMap(
+const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build";
+const CACHE_TTL_MS = isBuildPhase ? 60_000 : 2_000;
+
+let cachedOverrides: Map<string, ProductOverride> | null = null;
+let cachedAt = 0;
+let inflightOverrides: Promise<Map<string, ProductOverride>> | null = null;
+
+export function invalidateOverridesCache(): void {
+  cachedOverrides = null;
+  cachedAt = 0;
+  inflightOverrides = null;
+}
+
+async function fetchOverrideMapFromDb(
   siteIds?: string[],
 ): Promise<Map<string, ProductOverride>> {
   try {
@@ -78,30 +90,37 @@ export async function getOverrideMap(
   }
 }
 
+/** All overrides (optionally site-scoped), keyed by SKU id. Empty on any error. */
+export async function getOverrideMap(
+  siteIds?: string[],
+): Promise<Map<string, ProductOverride>> {
+  const now = Date.now();
+  if (cachedOverrides && now - cachedAt < CACHE_TTL_MS) {
+    return new Map(cachedOverrides);
+  }
+  if (!inflightOverrides) {
+    inflightOverrides = Promise.race([
+      fetchOverrideMapFromDb(siteIds),
+      new Promise<Map<string, ProductOverride>>((resolve) =>
+        setTimeout(() => resolve(new Map()), 2500),
+      ),
+    ]).then((res) => {
+      cachedOverrides = res;
+      cachedAt = Date.now();
+      inflightOverrides = null;
+      return res;
+    });
+  }
+  const map = await inflightOverrides;
+  return new Map(map);
+}
+
 /** Override for a single SKU (used by the PDP). Undefined on any error. */
 export async function getOverrideForSku(
   skuId: string,
 ): Promise<ProductOverride | undefined> {
-  try {
-    const [r] = await db
-      .select(EXTENDED_COLS)
-      .from(productOverrides)
-      .where(eq(productOverrides.skuId, skuId))
-      .limit(1);
-    return r ? (r as ProductOverride) : undefined;
-  } catch (err) {
-    if (!isMissingColumnError(err)) return undefined;
-    try {
-      const [r] = await db
-        .select(BASE_COLS)
-        .from(productOverrides)
-        .where(eq(productOverrides.skuId, skuId))
-        .limit(1);
-      return r ? (r as ProductOverride) : undefined;
-    } catch {
-      return undefined;
-    }
-  }
+  const map = await getOverrideMap();
+  return map.get(skuId);
 }
 
 /** Apply a whole override map to a list of code SKUs. */

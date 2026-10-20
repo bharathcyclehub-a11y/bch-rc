@@ -35,6 +35,13 @@ export const metadata: Metadata = {
 
 export const revalidate = 60;
 
+function withSsrTimeout<T>(promise: Promise<T>, fallback: T, ms = 2500): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 const homepageJsonLd = {
   "@context": "https://schema.org",
   "@graph": [
@@ -68,10 +75,11 @@ const homepageJsonLd = {
 
 export default async function Page() {
   const [overridesMapObj, stockMap] = await Promise.all([
-    getOverrideMap()
-      .then((m) => Object.fromEntries(m.entries()))
-      .catch(() => ({} as Record<string, ProductOverride>)),
-    getStockMap().catch(() => null),
+    withSsrTimeout<Record<string, ProductOverride>>(
+      getOverrideMap().then((m) => Object.fromEntries(m.entries())),
+      {},
+    ),
+    withSsrTimeout(getStockMap(), null),
   ]);
 
   return (

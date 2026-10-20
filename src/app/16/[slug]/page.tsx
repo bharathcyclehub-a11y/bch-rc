@@ -5,14 +5,23 @@ import Footer16 from "@/components/store16/Footer16";
 import Pdp16 from "@/components/store16/Pdp16";
 import { STORE16_PRODUCTS, getStore16Product } from "@/lib/store16";
 import { getSkuBySlug } from "@/lib/products";
-import { getOverrideMap } from "@/lib/product-overrides";
+import { getOverrideForSku } from "@/lib/product-overrides";
 import { getStockMap } from "@/lib/inventory";
 import { resolveProductAvailability } from "@/lib/availability";
 
 export const revalidate = 60;
 
+function withSsrTimeout<T>(promise: Promise<T>, fallback: T, ms = 2500): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export function generateStaticParams() {
-  return STORE16_PRODUCTS.map((p) => ({ slug: p.slug }));
+  return STORE16_PRODUCTS.filter((p) => !getSkuBySlug(p.slug)?.hidden).map((p) => ({
+    slug: p.slug,
+  }));
 }
 
 export async function generateMetadata({
@@ -39,12 +48,13 @@ export default async function Store16ProductPage({
   if (!product) notFound();
 
   const sku = getSkuBySlug(slug);
-  const [overridesMap, stockMap] = await Promise.all([
-    getOverrideMap().catch(() => new Map()),
-    getStockMap().catch(() => null),
+  if (sku?.hidden) notFound();
+
+  const [ov, stockMap] = await Promise.all([
+    withSsrTimeout(getOverrideForSku(slug), undefined, 1500),
+    withSsrTimeout(getStockMap([slug]), null, 1500),
   ]);
-  const ov = overridesMap.get(slug);
-  if (ov?.hidden === true || sku?.hidden) notFound();
+  if (ov?.hidden === true) notFound();
   if (sku && stockMap !== null) {
     const avail = resolveProductAvailability(sku, stockMap, ov);
     if (!avail.purchasable) notFound();

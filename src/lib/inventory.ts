@@ -9,7 +9,7 @@
  * reconciliation) — this file does not duplicate that logic.
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { inventory } from "@/db/schema";
 import { PRODUCTS } from "@/lib/products";
@@ -97,14 +97,20 @@ export function expandSkuIdsWithBundleComponents(skuIds?: string[]): string[] | 
   return Array.from(set);
 }
 
-/**
- * Live stock per `${skuId}:${variantSlug}` from the DB — the single source of
- * truth. Optionally filter to specific SKUs (automatically expanding bundle
- * component SKUs). A key that is absent from the returned map means "no
- * inventory row configured" (callers treat as 0/unavailable).
- */
-export async function getStockMap(skuIds?: string[]): Promise<Record<string, number>> {
-  const expanded = expandSkuIdsWithBundleComponents(skuIds);
+const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build";
+const STOCK_CACHE_TTL_MS = isBuildPhase ? 60_000 : 2_000;
+
+let cachedFullStockMap: Record<string, number> | null = null;
+let cachedStockAt = 0;
+let inflightStockPromise: Promise<Record<string, number>> | null = null;
+
+export function invalidateInventoryCache(): void {
+  cachedFullStockMap = null;
+  cachedStockAt = 0;
+  inflightStockPromise = null;
+}
+
+async function fetchFullStockMapFromDb(): Promise<Record<string, number>> {
   const rows = await db
     .select({
       skuId: inventory.skuId,
@@ -112,18 +118,53 @@ export async function getStockMap(skuIds?: string[]): Promise<Record<string, num
       stock: inventory.stock,
     })
     .from(inventory)
-    .where(
-      expanded && expanded.length > 0
-        ? and(
-            eq(inventory.siteId, INVENTORY_SITE_ID),
-            inArray(inventory.skuId, expanded),
-          )
-        : eq(inventory.siteId, INVENTORY_SITE_ID),
-    );
+    .where(eq(inventory.siteId, INVENTORY_SITE_ID));
 
   const map: Record<string, number> = {};
   for (const r of rows) map[`${r.skuId}:${r.variantSlug}`] = r.stock;
   return map;
+}
+
+/**
+ * Live stock per `${skuId}:${variantSlug}` from the DB — the single source of
+ * truth. Optionally filter to specific SKUs (automatically expanding bundle
+ * component SKUs). A key that is absent from the returned map means "no
+ * inventory row configured" (callers treat as 0/unavailable).
+ */
+export async function getStockMap(skuIds?: string[]): Promise<Record<string, number>> {
+  const now = Date.now();
+  let fullMap = cachedFullStockMap;
+  if (!fullMap || now - cachedStockAt >= STOCK_CACHE_TTL_MS) {
+    if (!inflightStockPromise) {
+      inflightStockPromise = fetchFullStockMapFromDb()
+        .then((res) => {
+          cachedFullStockMap = res;
+          cachedStockAt = Date.now();
+          inflightStockPromise = null;
+          return res;
+        })
+        .catch((err) => {
+          inflightStockPromise = null;
+          throw err;
+        });
+    }
+    fullMap = await inflightStockPromise;
+  }
+
+  const expanded = expandSkuIdsWithBundleComponents(skuIds);
+  if (!expanded || expanded.length === 0) {
+    return { ...fullMap };
+  }
+  const allowed = new Set(expanded);
+  const filtered: Record<string, number> = {};
+  for (const [k, v] of Object.entries(fullMap)) {
+    const colonIdx = k.indexOf(":");
+    const skuId = colonIdx === -1 ? k : k.slice(0, colonIdx);
+    if (allowed.has(skuId)) {
+      filtered[k] = v;
+    }
+  }
+  return filtered;
 }
 
 export type InventoryHealthItem = ExpectedKey & {
