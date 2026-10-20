@@ -74,7 +74,10 @@ export async function storeEvidence(file: File, ticketId: string): Promise<Store
     await supabase.storage
       .createBucket(EVIDENCE_BUCKET, { public: false, fileSizeLimit: MAX_EVIDENCE_BYTES })
       .catch(() => {});
-    const { error } = await supabase.storage.from(EVIDENCE_BUCKET).upload(storagePath, body, { contentType: mimeType, upsert: false });
+    const uploadBlob = new Blob([new Uint8Array(body)], { type: mimeType });
+    const { error } = await supabase.storage
+      .from(EVIDENCE_BUCKET)
+      .upload(storagePath, uploadBlob, { contentType: mimeType, upsert: false });
     if (error) throw new Error(`evidence upload failed: ${error.message}`);
   } else {
     const full = path.join(LOCAL_DIR, storagePath);

@@ -79,9 +79,10 @@ export async function POST(req: Request) {
   }
 
   const path = `${crypto.randomUUID()}.webp`;
+  const uploadBlob = new Blob([new Uint8Array(optimized)], { type: "image/webp" });
   const { error } = await supabase.storage
     .from(BUCKET)
-    .upload(path, optimized, { contentType: "image/webp", upsert: false });
+    .upload(path, uploadBlob, { contentType: "image/webp", upsert: false });
   if (error) {
     return NextResponse.json(
       { ok: false, reason: error.message || "Upload failed" },
