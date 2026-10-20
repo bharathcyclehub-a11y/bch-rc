@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { HUB_CATEGORIES, type HubCategory } from "@/lib/hub-categories";
 import { HubProductCard } from "@/components/hub/HubProductCard";
+import { useLiveStock } from "@/lib/use-live-stock";
+import { resolveProductAvailability, type ProductOverride } from "@/lib/availability";
 import { cn } from "@/lib/utils";
 
 const PREVIEW_COUNT = 3;
@@ -23,8 +25,16 @@ function sample<T>(arr: readonly T[], n: number): T[] {
 
 type ReviewSummary = { count: number; averageRating: number };
 
-export default function HubShop() {
-  const [stockMap, setStockMap] = useState<Record<string, number> | null>(null);
+export default function HubShop({
+  initialStockMap = null,
+  initialOverrides = {},
+}: {
+  initialStockMap?: Record<string, number> | null;
+  initialOverrides?: Record<string, ProductOverride>;
+} = {}) {
+  const { stockMap: liveStockMap, overridesMap: liveOverridesMap } = useLiveStock();
+  const stockMap = liveStockMap ?? initialStockMap;
+  const overridesMap = liveStockMap ? liveOverridesMap : initialOverrides;
   const [salesMap, setSalesMap] = useState<Record<string, number> | null>(null);
   const [reviewsMap, setReviewsMap] = useState<Record<string, ReviewSummary> | null>(
     null,
@@ -34,12 +44,6 @@ export default function HubShop() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/stock")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!cancelled && d && typeof d.stock === "object") setStockMap(d.stock);
-      })
-      .catch(() => {});
 
     // Real 30-day units sold — drives "Selling fast", "N sold this month" and
     // the earned BESTSELLER badge.
@@ -64,16 +68,34 @@ export default function HubShop() {
     };
   }, []);
 
+  const visibleByCat = useMemo(() => {
+    const map: Record<string, HubCategory["skus"]> = {};
+    for (const c of HUB_CATEGORIES) {
+      map[c.key] = c.skus.filter((sku) => {
+        const ov = overridesMap?.[sku.id];
+        if (ov?.hidden === true || sku.hidden) return false;
+        if (stockMap !== null) {
+          const avail = resolveProductAvailability(sku, stockMap, ov);
+          if (!avail.purchasable) return false;
+        }
+        return true;
+      });
+    }
+    return map;
+  }, [stockMap, overridesMap]);
+
   useEffect(() => {
     const map: Record<string, HubCategory["skus"]> = {};
     for (const c of HUB_CATEGORIES) {
-      if (c.skus.length) map[c.key] = sample(c.skus, PREVIEW_COUNT);
+      const list = visibleByCat[c.key] ?? [];
+      if (list.length) map[c.key] = sample(list, PREVIEW_COUNT);
     }
     setPreviewByCat(map);
-  }, []);
+  }, [visibleByCat]);
 
   const cat = HUB_CATEGORIES.find((c) => c.key === active) ?? HUB_CATEGORIES[0];
-  const preview = previewByCat[cat.key] ?? cat.skus.slice(0, PREVIEW_COUNT);
+  const catVisibleSkus = visibleByCat[cat.key] ?? [];
+  const preview = previewByCat[cat.key] ?? catVisibleSkus.slice(0, PREVIEW_COUNT);
 
   return (
     <section
@@ -139,7 +161,7 @@ export default function HubShop() {
         </div>
 
         {/* Product Showcase: Original production product cards immediately underneath the categories */}
-        {cat.skus.length > 0 ? (
+        {catVisibleSkus.length > 0 ? (
           <div className="mt-6 sm:mt-8">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-5 lg:grid-cols-4">
               {preview.map((sku, i) => (
@@ -147,6 +169,7 @@ export default function HubShop() {
                   key={sku.id}
                   sku={sku}
                   stockMap={stockMap}
+                  overridesMap={overridesMap}
                   salesMap={salesMap}
                   reviewsMap={reviewsMap}
                   className={i >= 2 ? "hidden sm:flex" : undefined}

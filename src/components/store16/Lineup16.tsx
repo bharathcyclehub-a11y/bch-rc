@@ -6,6 +6,9 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Zap, ShoppingBag } from "lucide-react";
 import { STORE16, STORE16_PRODUCTS, formatINR16, type Store16Product } from "@/lib/store16";
+import { getSkuBySlug } from "@/lib/products";
+import { useLiveStock } from "@/lib/use-live-stock";
+import { resolveProductAvailability } from "@/lib/availability";
 import { useCart16 } from "@/lib/cart-store";
 import { OFFERS } from "@/lib/config";
 import { calcDiscountPct } from "@/lib/utils";
@@ -163,6 +166,18 @@ function Card16({ p, index }: { p: Store16Product; index: number }) {
 }
 
 export function Lineup16() {
+  const { stockMap, overridesMap } = useLiveStock();
+  const visibleProducts = STORE16_PRODUCTS.filter((p) => {
+    const sku = getSkuBySlug(p.slug);
+    const ov = overridesMap?.[p.slug];
+    if (ov?.hidden === true || sku?.hidden) return false;
+    if (sku && stockMap !== null) {
+      const avail = resolveProductAvailability(sku, stockMap, ov);
+      if (!avail.purchasable) return false;
+    }
+    return true;
+  });
+
   return (
     <section id="lineup" className="bg-brand-cream py-7 sm:py-14">
       <div className="mx-auto max-w-7xl px-5 sm:px-10">
@@ -177,7 +192,7 @@ export function Lineup16() {
         </div>
 
         <div className="-mx-5 flex snap-x snap-mandatory gap-5 overflow-x-auto overflow-y-hidden px-5 pb-4 no-scrollbar sm:-mx-10 sm:gap-6 sm:px-10">
-          {STORE16_PRODUCTS.map((p, i) => (
+          {visibleProducts.map((p, i) => (
             <Card16 key={p.slug} p={p} index={i} />
           ))}
         </div>

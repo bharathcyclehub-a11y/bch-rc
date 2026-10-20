@@ -139,6 +139,26 @@ export async function POST(req: Request) {
         source: "admin",
       });
 
+      if (body.skuId !== "qa-1rs") {
+        const skuRows = await tx
+          .select({ stock: inventory.stock })
+          .from(inventory)
+          .where(
+            and(
+              eq(inventory.siteId, siteId),
+              eq(inventory.skuId, body.skuId),
+            ),
+          );
+        const totalSkuStock = skuRows.reduce((sum, r) => sum + Math.max(0, r.stock), 0);
+        const shouldHide = totalSkuStock <= 0;
+        await tx.execute(sql`
+          insert into product_overrides (site_id, sku_id, hidden, coming_soon, updated_at, updated_by)
+          values (${siteId}, ${body.skuId}, ${shouldHide}, false, now(), ${ctx.email})
+          on conflict (site_id, sku_id)
+          do update set hidden = ${shouldHide}, updated_at = now(), updated_by = ${ctx.email}
+        `);
+      }
+
       return { before, after };
     });
 

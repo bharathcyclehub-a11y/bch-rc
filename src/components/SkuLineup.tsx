@@ -252,12 +252,14 @@ function SkuCard({ sku, index, stockMap }: SkuCardProps) {
 export default function SkuLineup() {
   // Live DB stock for the whole grid — single source of truth, fetched once.
   const [stockMap, setStockMap] = useState<Record<string, number> | null>(null);
+  const [overridesMap, setOverridesMap] = useState<Record<string, { hidden?: boolean | null }> | null>(null);
   useEffect(() => {
     let cancelled = false;
     fetch("/api/stock")
       .then((r) => r.json())
       .then((d) => {
         if (!cancelled && d && typeof d.stock === "object") setStockMap(d.stock);
+        if (!cancelled && d && typeof d.overrides === "object") setOverridesMap(d.overrides);
       })
       .catch(() => {
         /* leave optimistic on failure */
@@ -267,6 +269,17 @@ export default function SkuLineup() {
     };
   }, []);
 
+  const visibleProducts = getVisibleProducts().filter((sku) => {
+    if (overridesMap?.[sku.id]?.hidden === true) return false;
+    if (stockMap !== null) {
+      const variantKeys = sku.colors?.length
+        ? sku.colors.map((c) => `${sku.id}:${c.slug}`)
+        : [`${sku.id}:`];
+      if (variantKeys.every((k) => (stockMap[k] ?? 0) <= 0)) return false;
+    }
+    return true;
+  });
+
   return (
     <section id="sku" className="py-8 sm:py-14 bg-white">
       <div className="max-w-6xl mx-auto px-4">
@@ -274,13 +287,13 @@ export default function SkuLineup() {
           Pick your RC car.
         </h2>
         <p className="text-brand-ink-soft text-center mt-2 text-sm sm:text-base">
-          5 cars · from ₹999 · ships from Bangalore
+          {visibleProducts.length} cars · from ₹999 · ships from Bangalore
         </p>
       </div>
 
       <div className="max-w-7xl mx-auto px-4 mt-6 sm:mt-10">
         <div className="flex overflow-x-auto overflow-y-hidden snap-x snap-mandatory gap-4 no-scrollbar -mx-4 px-4 pb-4 sm:grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 sm:gap-5 lg:gap-6 sm:overflow-visible sm:min-w-0 sm:mx-0 sm:px-0 sm:pb-0">
-          {getVisibleProducts().map((sku, i) => (
+          {visibleProducts.map((sku, i) => (
             <SkuCard key={sku.id} sku={sku} index={i} stockMap={stockMap} />
           ))}
         </div>

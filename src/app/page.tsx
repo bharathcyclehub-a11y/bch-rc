@@ -14,6 +14,8 @@ import HubBuildYourOwn from "@/components/hub/HubBuildYourOwn";
 import InstaCommunity16 from "@/components/store16/InstaCommunity16";
 import CustomerReviewsSlider from "@/components/CustomerReviewsSlider";
 import Footer from "@/components/Footer";
+import { getOverrideMap, type ProductOverride } from "@/lib/product-overrides";
+import { getStockMap } from "@/lib/inventory";
 // Spin-wheel discount popup hidden on request (2026-07-08). Re-enable by
 // uncommenting this import and the <HubSpinWheel /> mount below.
 // import HubSpinWheel from "@/components/hub/HubSpinWheel";
@@ -31,7 +33,7 @@ export const metadata: Metadata = {
   alternates: { canonical: "https://pocketrccars.com/" },
 };
 
-export const revalidate = 3600;
+export const revalidate = 60;
 
 const homepageJsonLd = {
   "@context": "https://schema.org",
@@ -64,7 +66,14 @@ const homepageJsonLd = {
   ],
 };
 
-export default function Page() {
+export default async function Page() {
+  const [overridesMapObj, stockMap] = await Promise.all([
+    getOverrideMap()
+      .then((m) => Object.fromEntries(m.entries()))
+      .catch(() => ({} as Record<string, ProductOverride>)),
+    getStockMap().catch(() => null),
+  ]);
+
   return (
     <>
       <script
@@ -90,7 +99,7 @@ export default function Page() {
 
         {/* SHOP — category tabs → shoppable grid of every model, one shared
             cart (mix scales, checkout once). */}
-        <HubShop />
+        <HubShop initialStockMap={stockMap} initialOverrides={overridesMapObj} />
 
         {/* BUNDLE — "Bundle & save" cards; % ladder off the shared cart. */}
         <BundlePicker />

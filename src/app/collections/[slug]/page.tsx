@@ -234,8 +234,15 @@ export default async function CollectionSlugPage({
   ]);
   const stockMap = await withSsrTimeout(getStockMap(skuIds), null);
 
+  const visibleSkus =
+    stockMap !== null
+      ? rawSkus.filter(
+          (s) => resolveProductAvailability(s, stockMap, overridesMap[s.id]).purchasable,
+        )
+      : rawSkus;
+
   // Order available products first in server-rendered HTML
-  const sortedSkus = [...rawSkus].sort((a, b) => {
+  const sortedSkus = [...visibleSkus].sort((a, b) => {
     const avA = resolveProductAvailability(a, stockMap, overridesMap[a.id]);
     const avB = resolveProductAvailability(b, stockMap, overridesMap[b.id]);
     if (avA.sortRank !== avB.sortRank) return avA.sortRank - avB.sortRank;

@@ -216,6 +216,7 @@ export default function CollectionCatalogClient({
       const cls = getProductClassification(s);
       const avail = availMap[s.id] ?? resolveProductAvailability(s, stockMap, ov);
 
+      if (stockMap !== null && !avail.purchasable) return false;
       if (inStockOnly && !avail.purchasable) return false;
       if (scaleFilter !== "all" && s.scale !== scaleFilter) return false;
 

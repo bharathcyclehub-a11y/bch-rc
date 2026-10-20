@@ -470,6 +470,30 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // Auto-hide any non-internal SKU whose total remaining stock just hit 0.
+        const touchedSkuIds = Array.from(new Set(sortedStockReqs.map((r) => r.skuId)));
+        for (const skuId of touchedSkuIds) {
+          if (skuId === "qa-1rs") continue;
+          const skuRows = await tx
+            .select({ stock: inventory.stock })
+            .from(inventory)
+            .where(
+              and(
+                eq(inventory.siteId, INVENTORY_SITE_ID),
+                eq(inventory.skuId, skuId),
+              ),
+            );
+          const totalSkuStock = skuRows.reduce((sum, r) => sum + Math.max(0, r.stock), 0);
+          if (totalSkuStock <= 0) {
+            await tx.execute(sql`
+              insert into product_overrides (site_id, sku_id, hidden, coming_soon, updated_at, updated_by)
+              values (${INVENTORY_SITE_ID}, ${skuId}, true, false, now(), 'auto-zero-stock')
+              on conflict (site_id, sku_id)
+              do update set hidden = true, updated_at = now(), updated_by = 'auto-zero-stock'
+            `);
+          }
+        }
+
         // 3b. UPSERT customer by phone.
         const [customer] = await tx
           .insert(customers)

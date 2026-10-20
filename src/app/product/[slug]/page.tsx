@@ -329,6 +329,7 @@ export default async function ProductPage({
   if (sku.hidden) notFound();
 
   const avail = resolveProductAvailability(sku, liveStock, override);
+  if (!sku.internal && liveStock !== null && !avail.purchasable) notFound();
   const primaryCat = getPrimaryCategoryForSku(sku);
 
   const reviews = reviewRows.map((r) => ({
