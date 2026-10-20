@@ -15,7 +15,6 @@ import {
   Check,
   Lock,
   BadgeCheck,
-  Play,
   Sparkles,
   AlertCircle,
 } from "lucide-react";
@@ -61,28 +60,6 @@ function swatchBg(swatch: string): string {
     return `linear-gradient(135deg, ${swatch.slice("gradient:".length)})`;
   }
   return swatch;
-}
-
-function getApprovedActionVideo(sku: Sku): { src: string; caption: string; isExactModel: boolean } {
-  if (sku.heroVideo) {
-    return {
-      src: sku.heroVideo,
-      caption: `${sku.name} — Real Action Footage`,
-      isExactModel: true,
-    };
-  }
-  if (sku.scale === "1:64") {
-    return {
-      src: "/ugc/164prccars-00.mp4",
-      caption: "Pocket RC 1:64 Scale — Real Tabletop Drift & Action Clip",
-      isExactModel: false,
-    };
-  }
-  return {
-    src: "/hero/drift-mobile.mp4",
-    caption: "Pocket RC Performance Lineup — Real Action Demo",
-    isExactModel: false,
-  };
 }
 
 function GalleryImage({
@@ -138,7 +115,6 @@ export default function PDPClient({
   const [selectedColorSlug, setSelectedColorSlug] = useState<string | null>(
     sku.colors?.[0]?.slug ?? null,
   );
-  const [videoPlaying, setVideoPlaying] = useState(false);
   const unavailablePanelRef = useRef<HTMLDivElement>(null);
 
   const { stockMap, overridesMap } = useLiveStock(initialStockMap);
@@ -202,7 +178,7 @@ export default function PDPClient({
   }, [sku, stockMap, overridesMap]);
 
   // Consistent pricing presentation: onlinePrice vs COD retailINR vs MRP
-  const onlinePrice = Math.max(0, sku.retailINR - 100);
+  const onlinePrice = sku.id === "qa-1rs" ? 1 : Math.max(0, sku.retailINR - 100);
   const onlineSavings = Math.max(0, sku.mrpINR - onlinePrice);
   const onlinePct = calcDiscountPct(sku.mrpINR, onlinePrice);
 
@@ -212,8 +188,6 @@ export default function PDPClient({
     ? [heroSrc, ...colorAlts].filter(Boolean)
     : [heroSrc, ...(sku.altImages ?? [])].filter(Boolean);
   const activeSrc = gallery[activeImage] ?? heroSrc;
-
-  const actionVideo = useMemo(() => getApprovedActionVideo(sku), [sku]);
 
   function addToCart() {
     if (!canPurchase) return;
@@ -267,7 +241,7 @@ export default function PDPClient({
   return (
     <>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-12 max-w-6xl mx-auto px-4 py-4 sm:py-8">
-        {/* Image gallery + Click-to-play Action Video */}
+        {/* Image gallery */}
         <div className="space-y-3 lg:sticky lg:top-20 lg:self-start lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto no-scrollbar">
           <div className="aspect-square rounded-2xl overflow-hidden border border-brand-line bg-brand-cream relative">
             <GalleryImage src={activeSrc} sku={sku} alt={sku.name} priority />
@@ -308,52 +282,6 @@ export default function PDPClient({
               ))}
             </div>
           )}
-
-          {/* Lightweight click-to-play real RC action video section (Phase 4 & 7) */}
-          <div className="rounded-2xl border border-brand-line bg-zinc-950 text-white overflow-hidden">
-            <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/10 text-xs">
-              <span className="font-bold text-white/90 flex items-center gap-1.5">
-                <Play size={12} className="text-brand-red fill-brand-red" />
-                {actionVideo.caption}
-              </span>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-white/50">
-                {actionVideo.isExactModel ? "Exact Model Clip" : "Scale Demo"}
-              </span>
-            </div>
-            {!videoPlaying ? (
-              <button
-                type="button"
-                onClick={() => setVideoPlaying(true)}
-                className="group relative flex w-full aspect-video items-center justify-center bg-zinc-900 overflow-hidden cursor-pointer"
-                aria-label={`Play action video: ${actionVideo.caption}`}
-              >
-                <Image
-                  src={heroSrc}
-                  alt={actionVideo.caption}
-                  fill
-                  sizes="(min-width: 1024px) 540px, 100vw"
-                  className="object-contain opacity-65 transition-transform duration-300 group-hover:scale-105"
-                />
-                <div className="relative z-10 flex flex-col items-center gap-2">
-                  <span className="flex h-14 w-14 items-center justify-center rounded-full bg-brand-red text-white shadow-xl transition-transform group-hover:scale-110">
-                    <Play size={24} className="fill-white ml-0.5" />
-                  </span>
-                  <span className="rounded-full bg-black/75 px-3 py-1 text-xs font-bold text-white backdrop-blur-sm">
-                    Tap to Watch Real RC Action
-                  </span>
-                </div>
-              </button>
-            ) : (
-              <video
-                src={actionVideo.src}
-                controls
-                autoPlay
-                playsInline
-                preload="metadata"
-                className="w-full aspect-video bg-black object-contain"
-              />
-            )}
-          </div>
         </div>
 
         {/* Info column */}

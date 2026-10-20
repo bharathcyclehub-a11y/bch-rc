@@ -47,7 +47,7 @@ export default function PDPStickyCTA({
   }, []);
 
   const variantSlug = selectedColorSlug ?? defaultVariantSlug(sku);
-  const onlinePrice = Math.max(0, sku.retailINR - 100);
+  const onlinePrice = sku.id === "qa-1rs" ? 1 : Math.max(0, sku.retailINR - 100);
 
   function buyNow() {
     if (disabled) return;
