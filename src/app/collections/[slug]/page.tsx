@@ -1,13 +1,5 @@
 import type { Metadata } from "next";
-import Image from "next/image";
-import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
-import {
-  ArrowRight,
-  ShieldCheck,
-  Sparkles,
-  Truck,
-} from "lucide-react";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import { AnnouncementBar } from "@/components/AnnouncementBar";
@@ -16,7 +8,6 @@ import CollectionCatalogClient from "@/components/hub/CollectionCatalogClient";
 import {
   PRIMARY_CATEGORIES,
   LEGACY_CATEGORY_REDIRECTS,
-  getCategoryBySlug,
   getSkusForCategory,
   type PrimaryCategorySlug,
   type StoreCategory,
@@ -26,7 +17,6 @@ import { getStockMap } from "@/lib/inventory";
 import { resolveProductAvailability, schemaAvailabilityUrl } from "@/lib/availability";
 import { THEME } from "@/lib/theme";
 import { OFFERS } from "@/lib/config";
-import { formatINR } from "@/lib/utils";
 import { type Sku } from "@/lib/products";
 
 function withSsrTimeout<T>(promise: Promise<T>, fallback: T, ms = 2500): Promise<T> {
@@ -230,10 +220,6 @@ export default async function CollectionSlugPage({
     return 0;
   });
 
-  const relatedCategories = directCat.relatedCategorySlugs
-    .map((relSlug) => getCategoryBySlug(relSlug))
-    .filter((c): c is StoreCategory => Boolean(c));
-
   const jsonLd = buildCollectionJsonLd(
     directCat,
     sortedSkus,
@@ -261,107 +247,6 @@ export default async function CollectionSlugPage({
           initialStockMap={stockMap}
           initialOverridesMap={overridesMap}
         />
-
-        {/* Detailed Buyer Guide & Category Overview */}
-        <section className="border-t border-brand-line bg-white py-10 sm:py-16">
-          <div className="mx-auto max-w-5xl space-y-10 px-4 sm:px-6">
-            <div>
-              <span className="font-mono text-xs font-bold uppercase tracking-widest text-brand-red">
-                Collector & Buyer Guide
-              </span>
-              <h2 className="mt-1 font-display text-2xl font-extrabold uppercase tracking-wide text-brand-ink sm:text-3xl">
-                {directCat.seoTargetHeading}
-              </h2>
-              <p className="mt-3 text-sm leading-relaxed text-brand-ink-soft sm:text-base">
-                {directCat.description}
-              </p>
-              <p className="mt-3 text-sm leading-relaxed text-brand-ink-soft sm:text-base">
-                {directCat.longIntro}
-              </p>
-
-              <div className="mt-6 grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
-                <div className="rounded-2xl border border-brand-line bg-brand-cream p-4">
-                  <div className="flex items-center gap-2 font-bold text-brand-ink">
-                    <Truck size={15} className="text-brand-red" />
-                    24-Hour Bangalore Dispatch
-                  </div>
-                  <p className="mt-1 leading-relaxed text-brand-ink-soft">
-                    Every in-stock RC model is tested and dispatched from our
-                    Bangalore warehouse within 24 hours with live AWB tracking.
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-line bg-brand-cream p-4">
-                  <div className="flex items-center gap-2 font-bold text-brand-ink">
-                    <ShieldCheck size={15} className="text-brand-red" />
-                    7-Day Free Replacement
-                  </div>
-                  <p className="mt-1 leading-relaxed text-brand-ink-soft">
-                    Covered by our 7-day transit and manufacturing replacement
-                    guarantee across all Indian pincodes.
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-line bg-brand-cream p-4">
-                  <div className="flex items-center gap-2 font-bold text-brand-ink">
-                    <Sparkles size={15} className="text-brand-red" />
-                    Save ₹100 Online + Bundle Tiers
-                  </div>
-                  <p className="mt-1 leading-relaxed text-brand-ink-soft">
-                    Pay via UPI or Card to save ₹100 instantly, or mix any 2+
-                    cars to unlock 5% to 20% automatic bundle discounts.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-
-            {/* Related Collections & Buying Guides Cross-Links */}
-            <div className="border-t border-brand-line pt-6">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-display text-xl font-extrabold uppercase tracking-wide text-brand-ink sm:text-2xl">
-                  Explore Related RC Collections
-                </h2>
-                <Link
-                  href="/guides"
-                  className="inline-flex items-center gap-1 text-xs font-bold text-brand-red hover:underline"
-                >
-                  Read RC Buying Guides
-                  <ArrowRight size={13} />
-                </Link>
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                {relatedCategories.map((rel) => (
-                  <Link
-                    key={rel.slug}
-                    href={rel.url}
-                    className="group flex items-center gap-3.5 rounded-2xl border border-brand-line bg-brand-cream p-3.5 transition hover:border-brand-red hover:bg-white"
-                  >
-                    <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full bg-white ring-2 ring-brand-line group-hover:ring-brand-red">
-                      <Image
-                        src={rel.image}
-                        alt={rel.imageAlt}
-                        fill
-                        sizes="64px"
-                        className="object-cover"
-                      />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[10px] font-bold uppercase text-brand-red">
-                        {rel.shortLabel}
-                      </div>
-                      <div className="truncate font-display text-sm font-extrabold uppercase text-brand-ink group-hover:text-brand-red sm:text-base">
-                        {rel.name}
-                      </div>
-                      <div className="mt-0.5 inline-flex items-center gap-1 text-xs text-brand-ink-soft">
-                        From {formatINR(rel.priceFloorINR)} · View Store
-                        <ArrowRight size={11} />
-                      </div>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
       </main>
       <Footer />
       <HubClientUi />
