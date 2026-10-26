@@ -30,7 +30,7 @@ export const dynamic = "force-dynamic";
 
 const CartItemInput = z.object({
   skuId: z.string().min(1).max(80),
-  variantSlug: z.string().min(1).max(40).nullable().optional(),
+  variantSlug: z.string().max(40).nullable().optional().transform((v) => (v && v.trim() ? v.trim() : null)),
   qty: z.number().int().positive().max(20),
 });
 

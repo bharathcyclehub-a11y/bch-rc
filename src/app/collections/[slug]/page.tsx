@@ -4,7 +4,6 @@ import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 import {
   ArrowRight,
-  HelpCircle,
   ShieldCheck,
   Sparkles,
   Truck,
@@ -179,27 +178,9 @@ function buildCollectionJsonLd(
     mainEntity: { "@id": `${canonicalUrl}#itemlist` },
   };
 
-  const faqPage =
-    cat.faqs.length > 0
-      ? {
-          "@type": "FAQPage",
-          "@id": `${canonicalUrl}#faq`,
-          mainEntity: cat.faqs.map((f) => ({
-            "@type": "Question",
-            name: f.question,
-            acceptedAnswer: {
-              "@type": "Answer",
-              text: f.answer,
-            },
-          })),
-        }
-      : null;
-
   return {
     "@context": "https://schema.org",
-    "@graph": faqPage
-      ? [collectionPage, breadcrumbList, itemList, faqPage]
-      : [collectionPage, breadcrumbList, itemList],
+    "@graph": [collectionPage, breadcrumbList, itemList],
   };
 }
 
@@ -332,37 +313,6 @@ export default async function CollectionSlugPage({
               </div>
             </div>
 
-            {/* Category FAQs */}
-            {directCat.faqs.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-widest text-brand-red">
-                  <HelpCircle size={14} />
-                  Frequently Asked Questions
-                </div>
-                <h2 className="mt-1 font-display text-2xl font-extrabold uppercase tracking-wide text-brand-ink sm:text-3xl">
-                  {directCat.name} — Common Questions
-                </h2>
-                <div className="mt-5 space-y-3">
-                  {directCat.faqs.map((faq, idx) => (
-                    <details
-                      key={faq.question}
-                      open={idx === 0}
-                      className="group rounded-2xl border border-brand-line bg-brand-cream px-5 py-4"
-                    >
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-sm font-bold text-brand-ink sm:text-base">
-                        <span>{faq.question}</span>
-                        <span className="font-mono text-xs text-brand-red transition-transform group-open:rotate-90">
-                          →
-                        </span>
-                      </summary>
-                      <p className="mt-2.5 text-xs leading-relaxed text-brand-ink-soft sm:text-sm">
-                        {faq.answer}
-                      </p>
-                    </details>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Related Collections & Buying Guides Cross-Links */}
             <div className="border-t border-brand-line pt-6">
